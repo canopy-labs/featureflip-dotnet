@@ -1,0 +1,13 @@
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/bin/Debug/net8.0/Featureflip.Client.deps.json
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/bin/Debug/net8.0/Featureflip.Client.dll
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/bin/Debug/net8.0/Featureflip.Client.pdb
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.csproj.AssemblyReference.cache
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.GeneratedMSBuildEditorConfig.editorconfig
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.AssemblyInfoInputs.cache
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.AssemblyInfo.cs
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.csproj.CoreCompileInputs.cache
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.sourcelink.json
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.dll
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/refint/Featureflip.Client.dll
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/Featureflip.Client.pdb
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client/obj/Debug/net8.0/ref/Featureflip.Client.dll

@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Featureflip.Client.Extensions.DependencyInjection/Featureflip.Client.Extensions.DependencyInjection.csproj" />
+    <Project Path="src/Featureflip.Client/Featureflip.Client.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Featureflip.Client.Extensions.DependencyInjection.Tests/Featureflip.Client.Extensions.DependencyInjection.Tests.csproj" />
+    <Project Path="tests/Featureflip.Client.Tests/Featureflip.Client.Tests.csproj" />
+  </Folder>
+</Solution>

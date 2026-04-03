@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <Authors>Canopy Labs</Authors>
+    <Company>Canopy Labs LLC</Company>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://featureflip.io/docs/sdks/csharp/</PackageProjectUrl>
+    <PackageTags>feature-flags;feature-toggles;sdk;dotnet;featureflip</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Copyright>Copyright (c) 2026 Canopy Labs LLC</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>

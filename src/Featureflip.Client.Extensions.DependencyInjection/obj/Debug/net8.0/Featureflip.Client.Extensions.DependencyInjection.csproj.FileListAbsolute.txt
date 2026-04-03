@@ -1,0 +1,16 @@
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/bin/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.deps.json
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/bin/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.dll
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/bin/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.pdb
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/bin/Debug/net8.0/Featureflip.Client.dll
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/bin/Debug/net8.0/Featureflip.Client.pdb
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.csproj.AssemblyReference.cache
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.GeneratedMSBuildEditorConfig.editorconfig
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.AssemblyInfoInputs.cache
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.AssemblyInfo.cs
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.csproj.CoreCompileInputs.cache
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.sourcelink.json
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featuref.E828023E.Up2Date
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.dll
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/refint/Featureflip.Client.Extensions.DependencyInjection.dll
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/Featureflip.Client.Extensions.DependencyInjection.pdb
+/mnt/Data/Coding/feature-flagger/packages/csharp-sdk/src/Featureflip.Client.Extensions.DependencyInjection/obj/Debug/net8.0/ref/Featureflip.Client.Extensions.DependencyInjection.dll
