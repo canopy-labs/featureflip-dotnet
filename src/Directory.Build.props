@@ -4,6 +4,8 @@
     <Company>Canopy Labs LLC</Company>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://featureflip.io/docs/sdks/csharp/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/canopy-labs/featureflip-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PackageTags>feature-flags;feature-toggles;sdk;dotnet;featureflip</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Copyright>Copyright (c) 2026 Canopy Labs LLC</Copyright>
