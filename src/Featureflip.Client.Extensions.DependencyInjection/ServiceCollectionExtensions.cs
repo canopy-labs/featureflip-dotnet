@@ -27,7 +27,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IFeatureflipClient>(sp =>
         {
             var logger = sp.GetService<ILogger<FeatureflipClient>>();
-            return new FeatureflipClient(sdkKey, options, logger);
+            return FeatureflipClient.Get(sdkKey, options, logger);
         });
 
         return services;
@@ -55,7 +55,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IFeatureflipClient>(sp =>
         {
             var logger = sp.GetService<ILogger<FeatureflipClient>>();
-            return new FeatureflipClient(clientOptions.SdkKey, clientOptions, logger);
+            return FeatureflipClient.Get(clientOptions.SdkKey, clientOptions, logger);
         });
 
         return services;
@@ -83,7 +83,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IFeatureflipClient>(sp =>
         {
             var logger = sp.GetService<ILogger<FeatureflipClient>>();
-            return new FeatureflipClient(options.SdkKey, options, logger);
+            return FeatureflipClient.Get(options.SdkKey, options, logger);
         });
 
         return services;

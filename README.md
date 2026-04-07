@@ -13,7 +13,9 @@ dotnet add package Featureflip.Client
 ```csharp
 using Featureflip.Client;
 
-var client = new FeatureflipClient("your-sdk-key");
+var client = FeatureflipClient.Get("your-sdk-key");
+
+> **Lifetime:** The client is designed to be used as a singleton. Calling `FeatureflipClient.Get()` multiple times with the same SDK key returns handles sharing one underlying client — you cannot accidentally open duplicate streaming connections. For dependency injection, `AddFeatureflip` registers it as a singleton by default.
 
 var enabled = client.BoolVariation("my-feature",
     new EvaluationContext { UserId = "user-123" }, false);
@@ -29,9 +31,9 @@ client.Dispose();
 ## Configuration
 
 ```csharp
-var client = new FeatureflipClient(
-    sdkKey: "your-sdk-key",
-    options: new FeatureFlagOptions
+var client = FeatureflipClient.Get(
+    "your-sdk-key",
+    new FeatureFlagOptions
     {
         BaseUrl = "https://eval.featureflip.io",  // Evaluation API URL (default)
         Streaming = true,                          // SSE for real-time updates (default)
