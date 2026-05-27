@@ -18,5 +18,8 @@ public enum EvaluationReason
     FlagNotFound = 3,
 
     /// <summary>An error occurred during evaluation, returned default value.</summary>
-    Error = 4
+    Error = 4,
+
+    /// <summary>A prerequisite flag did not serve its expected variation; off variation was returned.</summary>
+    PrerequisiteFailed = 5
 }

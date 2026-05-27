@@ -15,12 +15,14 @@ internal sealed class EvaluationResult
     public string VariationKey { get; }
     public EvaluationReason Reason { get; }
     public string? RuleId { get; }
+    public string? PrerequisiteKey { get; }
 
-    public EvaluationResult(string variationKey, EvaluationReason reason, string? ruleId = null)
+    public EvaluationResult(string variationKey, EvaluationReason reason, string? ruleId = null, string? prerequisiteKey = null)
     {
         VariationKey = variationKey;
         Reason = reason;
         RuleId = ruleId;
+        PrerequisiteKey = prerequisiteKey;
     }
 }
 
@@ -32,6 +34,10 @@ internal sealed class FlagEvaluator
     // Timeout for regex operations to prevent ReDoS attacks
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(100);
 
+    // Safety net against pathological prerequisite chains. Cycles are blocked at
+    // write time on the server, so reaching this limit indicates a corrupt config.
+    internal const int MaxPrerequisiteDepth = 10;
+
 #if NETSTANDARD2_0
     // Cache MD5 instance per thread to avoid allocation overhead
     private static readonly ThreadLocal<MD5> Md5Instance = new(() => MD5.Create());
@@ -40,12 +46,112 @@ internal sealed class FlagEvaluator
     /// <summary>
     /// Evaluates a flag configuration against an evaluation context.
     /// </summary>
+    /// <param name="flag">The flag to evaluate.</param>
+    /// <param name="context">The evaluation context.</param>
+    /// <param name="getSegment">Optional segment lookup for segment-keyed rules.</param>
     public EvaluationResult Evaluate(FlagConfiguration flag, EvaluationContext context, Func<string, Segment?>? getSegment = null)
     {
+        return Evaluate(flag, context, allFlags: null, getSegment);
+    }
+
+    /// <summary>
+    /// Evaluates a flag, resolving any prerequisite flags using <paramref name="allFlags"/>.
+    /// </summary>
+    /// <param name="flag">The flag to evaluate.</param>
+    /// <param name="context">The evaluation context.</param>
+    /// <param name="allFlags">
+    /// Map of all flags in the environment, keyed by flag key. Required when the flag
+    /// has prerequisites; pass <c>null</c> if the flag is known to have no prerequisites.
+    /// </param>
+    /// <param name="getSegment">Optional segment lookup for segment-keyed rules.</param>
+    public EvaluationResult Evaluate(
+        FlagConfiguration flag,
+        EvaluationContext context,
+        IReadOnlyDictionary<string, FlagConfiguration>? allFlags,
+        Func<string, Segment?>? getSegment = null)
+    {
+        var memo = new Dictionary<string, EvaluationResult>(StringComparer.Ordinal);
+        return EvaluateInternal(flag, context, allFlags, getSegment, depth: 0, memo);
+    }
+
+    /// <summary>
+    /// Evaluates a flag, sharing a memoisation map with other concurrent evaluations
+    /// (e.g. a batch "evaluate all" pass). Use this when evaluating multiple flags
+    /// in one sweep so that shared prerequisite flags are only evaluated once.
+    /// </summary>
+    public EvaluationResult EvaluateWithSharedMemo(
+        FlagConfiguration flag,
+        EvaluationContext context,
+        IReadOnlyDictionary<string, FlagConfiguration>? allFlags,
+        Func<string, Segment?>? getSegment,
+        Dictionary<string, EvaluationResult> memo)
+    {
+        return EvaluateInternal(flag, context, allFlags, getSegment, depth: 0, memo);
+    }
+
+    private EvaluationResult EvaluateInternal(
+        FlagConfiguration flag,
+        EvaluationContext context,
+        IReadOnlyDictionary<string, FlagConfiguration>? allFlags,
+        Func<string, Segment?>? getSegment,
+        int depth,
+        Dictionary<string, EvaluationResult> memo)
+    {
+        if (depth > MaxPrerequisiteDepth)
+        {
+            return new EvaluationResult(flag.OffVariation, EvaluationReason.Error);
+        }
+
         // If flag is disabled, return off variation
         if (!flag.Enabled)
         {
             return new EvaluationResult(flag.OffVariation, EvaluationReason.FlagDisabled);
+        }
+
+        // Resolve prerequisites in order. A failing prerequisite short-circuits to the
+        // off variation with reason PrerequisiteFailed; error reasons propagate upward.
+        foreach (var prereq in flag.Prerequisites)
+        {
+            EvaluationResult prereqResult;
+            if (memo.TryGetValue(prereq.PrerequisiteFlagKey, out var cached))
+            {
+                prereqResult = cached;
+            }
+            else if (allFlags == null || !allFlags.TryGetValue(prereq.PrerequisiteFlagKey, out var prereqFlag) || prereqFlag == null)
+            {
+                // Missing flag: fail safely. Write-time delete-blocking should normally
+                // prevent this — treat as a prerequisite failure.
+                var miss = new EvaluationResult(
+                    flag.OffVariation,
+                    EvaluationReason.PrerequisiteFailed,
+                    ruleId: null,
+                    prerequisiteKey: prereq.PrerequisiteFlagKey);
+                memo[flag.Key] = miss;
+                return miss;
+            }
+            else
+            {
+                prereqResult = EvaluateInternal(prereqFlag, context, allFlags, getSegment, depth + 1, memo);
+                memo[prereq.PrerequisiteFlagKey] = prereqResult;
+            }
+
+            if (prereqResult.Reason == EvaluationReason.Error)
+            {
+                var err = new EvaluationResult(flag.OffVariation, EvaluationReason.Error);
+                memo[flag.Key] = err;
+                return err;
+            }
+
+            if (prereqResult.VariationKey != prereq.ExpectedVariationKey)
+            {
+                var failed = new EvaluationResult(
+                    flag.OffVariation,
+                    EvaluationReason.PrerequisiteFailed,
+                    ruleId: null,
+                    prerequisiteKey: prereq.PrerequisiteFlagKey);
+                memo[flag.Key] = failed;
+                return failed;
+            }
         }
 
         // Evaluate rules in priority order (lower priority = higher precedence)
@@ -56,7 +162,9 @@ internal sealed class FlagEvaluator
             if (EvaluateRule(rule, context, getSegment))
             {
                 var variationKey = ResolveServeConfig(rule.Serve!, context, flag.Key);
-                return new EvaluationResult(variationKey, EvaluationReason.RuleMatch, rule.Id);
+                var ruleResult = new EvaluationResult(variationKey, EvaluationReason.RuleMatch, rule.Id);
+                memo[flag.Key] = ruleResult;
+                return ruleResult;
             }
         }
 
@@ -64,11 +172,15 @@ internal sealed class FlagEvaluator
         if (flag.Fallthrough != null)
         {
             var variationKey = ResolveServeConfig(flag.Fallthrough, context, flag.Key);
-            return new EvaluationResult(variationKey, EvaluationReason.Fallthrough);
+            var fallResult = new EvaluationResult(variationKey, EvaluationReason.Fallthrough);
+            memo[flag.Key] = fallResult;
+            return fallResult;
         }
 
         // Default to off variation if no fallthrough
-        return new EvaluationResult(flag.OffVariation, EvaluationReason.Fallthrough);
+        var offResult = new EvaluationResult(flag.OffVariation, EvaluationReason.Fallthrough);
+        memo[flag.Key] = offResult;
+        return offResult;
     }
 
     private bool EvaluateRule(TargetingRule rule, EvaluationContext context, Func<string, Segment?>? getSegment)

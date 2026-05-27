@@ -86,6 +86,66 @@ public class JsonSerializationTests
         Assert.Equal(ServeType.Rollout, deserializedRollout);
     }
 
+    [Fact]
+    public void Deserialize_FlagConfigurationWithPrerequisites_FromWireFormat()
+    {
+        // The Evaluation API serves flag configs with a `prerequisites` array. The SDK
+        // must deserialize the camelCase property names from the wire format.
+        var json = """
+        {
+            "key": "child-flag",
+            "version": 1,
+            "type": "Boolean",
+            "enabled": true,
+            "variations": [
+                { "key": "on", "value": true },
+                { "key": "off", "value": false }
+            ],
+            "rules": [],
+            "fallthrough": { "type": "Fixed", "variation": "on" },
+            "offVariation": "off",
+            "prerequisites": [
+                { "prerequisiteFlagKey": "parent", "expectedVariationKey": "on" },
+                { "prerequisiteFlagKey": "other", "expectedVariationKey": "off" }
+            ]
+        }
+        """;
+
+        var options = CreateOptions();
+        var flag = JsonSerializer.Deserialize<FlagConfiguration>(json, options);
+
+        Assert.NotNull(flag);
+        Assert.Equal(2, flag!.Prerequisites.Count);
+        Assert.Equal("parent", flag.Prerequisites[0].PrerequisiteFlagKey);
+        Assert.Equal("on", flag.Prerequisites[0].ExpectedVariationKey);
+        Assert.Equal("other", flag.Prerequisites[1].PrerequisiteFlagKey);
+        Assert.Equal("off", flag.Prerequisites[1].ExpectedVariationKey);
+    }
+
+    [Fact]
+    public void Deserialize_FlagConfigurationWithoutPrerequisites_DefaultsToEmpty()
+    {
+        // Older flag configs without the prerequisites field must deserialize cleanly.
+        var json = """
+        {
+            "key": "no-prereqs",
+            "version": 1,
+            "type": "Boolean",
+            "enabled": true,
+            "variations": [{ "key": "on", "value": true }],
+            "rules": [],
+            "fallthrough": { "type": "Fixed", "variation": "on" },
+            "offVariation": "off"
+        }
+        """;
+
+        var flag = JsonSerializer.Deserialize<FlagConfiguration>(json, CreateOptions());
+
+        Assert.NotNull(flag);
+        Assert.NotNull(flag!.Prerequisites);
+        Assert.Empty(flag.Prerequisites);
+    }
+
     internal class EnumTestDto
     {
         public FlagType FlagType { get; set; }

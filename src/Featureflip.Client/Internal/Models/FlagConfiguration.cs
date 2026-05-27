@@ -10,4 +10,5 @@ internal sealed record FlagConfiguration
     public List<TargetingRule> Rules { get; init; } = new();
     public ServeConfig? Fallthrough { get; init; }
     public string OffVariation { get; init; } = string.Empty;
+    public List<Prerequisite> Prerequisites { get; init; } = new();
 }

@@ -21,17 +21,29 @@ public sealed class EvaluationDetail<T>
     /// <summary>Error message if evaluation failed.</summary>
     public string? ErrorMessage { get; }
 
+    /// <summary>
+    /// The key of the prerequisite flag that failed, when <see cref="Reason"/> is
+    /// <see cref="EvaluationReason.PrerequisiteFailed"/>. Null otherwise.
+    /// </summary>
+    public string? PrerequisiteKey { get; }
+
     public EvaluationDetail(T value, EvaluationReason reason, string? ruleId, string? errorMessage)
-        : this(value, reason, ruleId, errorMessage, variationKey: null)
+        : this(value, reason, ruleId, errorMessage, variationKey: null, prerequisiteKey: null)
     {
     }
 
     public EvaluationDetail(T value, EvaluationReason reason, string? ruleId, string? errorMessage, string? variationKey)
+        : this(value, reason, ruleId, errorMessage, variationKey, prerequisiteKey: null)
+    {
+    }
+
+    public EvaluationDetail(T value, EvaluationReason reason, string? ruleId, string? errorMessage, string? variationKey, string? prerequisiteKey)
     {
         Value = value;
         Reason = reason;
         RuleId = ruleId;
         ErrorMessage = errorMessage;
         VariationKey = variationKey;
+        PrerequisiteKey = prerequisiteKey;
     }
 }

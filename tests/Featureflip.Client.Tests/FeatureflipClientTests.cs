@@ -379,6 +379,43 @@ public class FeatureflipClientTests
         Assert.Equal("my-rule-id", result.RuleId);
     }
 
+    [Fact]
+    public void VariationDetail_PrerequisiteSatisfied_EndToEnd()
+    {
+        var parent = CreateBooleanFlag("parent", enabled: true, fallthroughVariation: "on");
+        var child = CreateBooleanFlag("child", enabled: true, fallthroughVariation: "on");
+        child = child with { Prerequisites = new List<Prerequisite>
+        {
+            new Prerequisite { PrerequisiteFlagKey = "parent", ExpectedVariationKey = "on" }
+        }};
+
+        var client = CreateTestClient(new List<FlagConfiguration> { parent, child });
+        var result = client.VariationDetail("child", new EvaluationContext { UserId = "u1" }, false);
+
+        Assert.True(result.Value);
+        Assert.Equal(EvaluationReason.Fallthrough, result.Reason);
+        Assert.Null(result.PrerequisiteKey);
+    }
+
+    [Fact]
+    public void VariationDetail_PrerequisiteFailed_EndToEndCarriesPrerequisiteKey()
+    {
+        var parent = CreateBooleanFlag("parent", enabled: false, fallthroughVariation: "on"); // disabled -> "off"
+        var child = CreateBooleanFlag("child", enabled: true, fallthroughVariation: "on");
+        child = child with { Prerequisites = new List<Prerequisite>
+        {
+            new Prerequisite { PrerequisiteFlagKey = "parent", ExpectedVariationKey = "on" }
+        }};
+
+        var client = CreateTestClient(new List<FlagConfiguration> { parent, child });
+        var result = client.VariationDetail("child", new EvaluationContext { UserId = "u1" }, true);
+
+        Assert.False(result.Value); // off variation = false
+        Assert.Equal(EvaluationReason.PrerequisiteFailed, result.Reason);
+        Assert.Equal("parent", result.PrerequisiteKey);
+        Assert.Equal("off", result.VariationKey);
+    }
+
     private static FeatureflipClient CreateTestClient(List<FlagConfiguration> flags)
     {
         var store = new FlagStore();

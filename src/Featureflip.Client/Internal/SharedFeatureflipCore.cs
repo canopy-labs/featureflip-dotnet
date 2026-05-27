@@ -229,11 +229,15 @@ internal sealed class SharedFeatureflipCore : IDisposable
                     $"Flag '{key}' not found");
             }
 
-            var result = _evaluator.Evaluate(flag, context, segKey =>
-            {
-                _store.TryGetSegment(segKey, out var seg);
-                return seg;
-            });
+            var result = _evaluator.Evaluate(
+                flag,
+                context,
+                _store.GetAllFlags(),
+                segKey =>
+                {
+                    _store.TryGetSegment(segKey, out var seg);
+                    return seg;
+                });
             var variation = flag.Variations.FirstOrDefault(v => v.Key == result.VariationKey);
 
             if (variation == null)
@@ -243,11 +247,12 @@ internal sealed class SharedFeatureflipCore : IDisposable
                     EvaluationReason.Error,
                     result.RuleId,
                     $"Variation '{result.VariationKey}' not found in flag '{key}'",
-                    result.VariationKey);
+                    result.VariationKey,
+                    result.PrerequisiteKey);
             }
 
             var value = DeserializeValue(variation.Value, defaultValue);
-            return new EvaluationDetail<T>(value, result.Reason, result.RuleId, null, result.VariationKey);
+            return new EvaluationDetail<T>(value, result.Reason, result.RuleId, null, result.VariationKey, result.PrerequisiteKey);
         }
         catch (Exception ex)
         {

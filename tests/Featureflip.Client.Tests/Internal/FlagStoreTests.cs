@@ -362,7 +362,7 @@ public class FlagStoreTests
         for (int iteration = 0; iteration < 50; iteration++)
         {
             var store = new FlagStore();
-            var barrier = new Barrier(2);
+            using var barrier = new Barrier(2);
 
             var replaceTask = Task.Run(() =>
             {
