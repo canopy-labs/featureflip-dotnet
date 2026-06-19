@@ -44,6 +44,25 @@ public class JsonSerializationTests
         Assert.Equal(ConditionOperator.StartsWith, result!.Operator);
     }
 
+    [Theory]
+    [InlineData("SemverEquals")]
+    [InlineData("SemverGreaterThan")]
+    [InlineData("SemverGreaterThanOrEqual")]
+    [InlineData("SemverLessThan")]
+    [InlineData("SemverLessThanOrEqual")]
+    public void Deserialize_PascalCaseSemverOperators_FromApiResponse(string wireValue)
+    {
+        // ConditionOperator is internal, so compare by member name (string) rather than typing
+        // the parameter as the enum (which a public xUnit theory method can't accept).
+        var json = $$"""{"operator": "{{wireValue}}"}""";
+
+        var options = CreateOptions();
+        var result = JsonSerializer.Deserialize<OperatorTestDto>(json, options);
+
+        Assert.NotNull(result);
+        Assert.Equal(wireValue, result!.Operator.ToString());
+    }
+
     [Fact]
     public void Serialize_EnumValues_UsesPascalCase()
     {

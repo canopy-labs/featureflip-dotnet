@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Semantic-version condition operators** (`SemverEquals`, `SemverGreaterThan`, `SemverGreaterThanOrEqual`, `SemverLessThan`, `SemverLessThanOrEqual`) for local rule evaluation. Versions are compared per [semver.org](https://semver.org) precedence rather than as decimals, so multi-segment versions like `2.10.1` target correctly (the numeric operators silently mis-targeted them). Mirrors the evaluation engine and the JS SDK (#1409 follow-up).
+
 ## 2.0.0 — 2026-04-06
 
 ### BREAKING

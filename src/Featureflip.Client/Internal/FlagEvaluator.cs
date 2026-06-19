@@ -161,7 +161,7 @@ internal sealed class FlagEvaluator
         {
             if (EvaluateRule(rule, context, getSegment))
             {
-                var variationKey = ResolveServeConfig(rule.Serve!, context, flag.Key);
+                var variationKey = ResolveServeConfig(rule.Serve!, context);
                 var ruleResult = new EvaluationResult(variationKey, EvaluationReason.RuleMatch, rule.Id);
                 memo[flag.Key] = ruleResult;
                 return ruleResult;
@@ -171,7 +171,7 @@ internal sealed class FlagEvaluator
         // No rules matched, use fallthrough
         if (flag.Fallthrough != null)
         {
-            var variationKey = ResolveServeConfig(flag.Fallthrough, context, flag.Key);
+            var variationKey = ResolveServeConfig(flag.Fallthrough, context);
             var fallResult = new EvaluationResult(variationKey, EvaluationReason.Fallthrough);
             memo[flag.Key] = fallResult;
             return fallResult;
@@ -224,11 +224,56 @@ internal sealed class FlagEvaluator
             return condition.Negate;
         }
 
+        // Type-aware numeric coercion for equality operators (#1458). When the attribute is a
+        // boxed CLR numeric (bool is excluded by omission) and the operator is an equality op,
+        // compare numerically so that 1 == "1.0" and 1.0 == "1" — mirroring the engine. Each
+        // literal is parsed with the same strict, culture-invariant parse as CompareNumeric, so
+        // unparseable literals ("1abc") never match. String/bool attributes fall through to the
+        // existing case-insensitive string path below.
+        if (IsEqualityOperator(condition.Operator) && TryGetNumericValue(attributeValue, out var numericAttr))
+        {
+            var anyEqual = condition.Values.Any(v =>
+                double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var nv) && nv == numericAttr);
+            var numericResult = condition.Operator is ConditionOperator.Equals or ConditionOperator.In
+                ? anyEqual
+                : !anyEqual; // NotEquals / NotIn
+            return condition.Negate ? !numericResult : numericResult;
+        }
+
         var stringValue = ConvertToString(attributeValue);
 
         bool result = EvaluateOperator(condition.Operator, stringValue, condition.Values);
 
         return condition.Negate ? !result : result;
+    }
+
+    /// <summary>
+    /// True for the four operators that coerce numerically when the attribute is a number:
+    /// <see cref="ConditionOperator.Equals"/>, <see cref="ConditionOperator.NotEquals"/>,
+    /// <see cref="ConditionOperator.In"/>, <see cref="ConditionOperator.NotIn"/>. Substring/
+    /// prefix operators (Contains/StartsWith/EndsWith) are deliberately excluded.
+    /// </summary>
+    private static bool IsEqualityOperator(ConditionOperator op) =>
+        op is ConditionOperator.Equals or ConditionOperator.NotEquals
+            or ConditionOperator.In or ConditionOperator.NotIn;
+
+    /// <summary>
+    /// Extracts a <see cref="double"/> from a boxed CLR numeric attribute value, returning false
+    /// for any non-numeric type. <c>bool</c> is deliberately NOT matched, so booleans keep the
+    /// string-compare path. Context attributes are always supplied as native boxed primitives via
+    /// <c>EvaluationContext.Set</c>, so no JSON-token handling is needed here.
+    /// </summary>
+    private static bool TryGetNumericValue(object value, out double result)
+    {
+        switch (value)
+        {
+            case byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal:
+                result = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                return true;
+            default:
+                result = 0;
+                return false;
+        }
     }
 
     private static string ConvertToString(object? value)
@@ -277,13 +322,15 @@ internal sealed class FlagEvaluator
                 {
                     try
                     {
+                        // Case-sensitive matching mirrors the engine (RegexOptions.None).
+                        // Case-insensitivity is opt-in via the (?i) inline flag in the pattern.
 #if NETSTANDARD2_0
                         // netstandard2.0 doesn't support timeout in IsMatch overload
                         // Create a Regex instance with timeout instead
-                        var regex = new Regex(pattern, RegexOptions.IgnoreCase, RegexTimeout);
+                        var regex = new Regex(pattern, RegexOptions.None, RegexTimeout);
                         return regex.IsMatch(value);
 #else
-                        return Regex.IsMatch(value, pattern, RegexOptions.IgnoreCase, RegexTimeout);
+                        return Regex.IsMatch(value, pattern, RegexOptions.None, RegexTimeout);
 #endif
                     }
                     catch (RegexMatchTimeoutException)
@@ -298,53 +345,155 @@ internal sealed class FlagEvaluator
                 });
 
             case ConditionOperator.GreaterThan:
-                return conditionValues.Any(v => CompareNumeric(value, v) > 0);
+                return CompareNumeric(value, conditionValues, (a, b) => a > b);
 
             case ConditionOperator.LessThan:
-                return conditionValues.Any(v => CompareNumeric(value, v) < 0);
+                return CompareNumeric(value, conditionValues, (a, b) => a < b);
 
             case ConditionOperator.GreaterThanOrEqual:
-                return conditionValues.Any(v => CompareNumeric(value, v) >= 0);
+                return CompareNumeric(value, conditionValues, (a, b) => a >= b);
 
             case ConditionOperator.LessThanOrEqual:
-                return conditionValues.Any(v => CompareNumeric(value, v) <= 0);
+                return CompareNumeric(value, conditionValues, (a, b) => a <= b);
 
             case ConditionOperator.Before:
-                return conditionValues.Any(v => CompareDateTime(value, v) < 0);
+                return CompareDateTime(value, conditionValues, (a, b) => a < b);
 
             case ConditionOperator.After:
-                return conditionValues.Any(v => CompareDateTime(value, v) > 0);
+                return CompareDateTime(value, conditionValues, (a, b) => a > b);
+
+            case ConditionOperator.SemverEquals:
+                return CompareSemver(value, conditionValues, c => c == 0);
+
+            case ConditionOperator.SemverGreaterThan:
+                return CompareSemver(value, conditionValues, c => c > 0);
+
+            case ConditionOperator.SemverGreaterThanOrEqual:
+                return CompareSemver(value, conditionValues, c => c >= 0);
+
+            case ConditionOperator.SemverLessThan:
+                return CompareSemver(value, conditionValues, c => c < 0);
+
+            case ConditionOperator.SemverLessThanOrEqual:
+                return CompareSemver(value, conditionValues, c => c <= 0);
 
             default:
                 return false;
         }
     }
 
-    private static int CompareNumeric(string value, string conditionValue)
+    /// <summary>
+    /// Compares <paramref name="value"/> against each condition value as a semantic version,
+    /// returning true when the comparison sign satisfies <paramref name="predicate"/> for any
+    /// condition value. Unparseable versions contribute no match (consistent with the numeric and
+    /// date/time operators). See <see cref="SemverComparer"/> for the precedence rules.
+    /// </summary>
+    private static bool CompareSemver(string value, List<string> conditionValues, Func<int, bool> predicate)
+    {
+        if (!SemverComparer.TryParse(value, out var left))
+        {
+            return false;
+        }
+
+        foreach (var conditionValue in conditionValues)
+        {
+            if (SemverComparer.TryParse(conditionValue, out var right) && predicate(SemverComparer.Compare(left, right)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Returns true when comparing <paramref name="value"/> as a number against any condition
+    /// value satisfies <paramref name="comparison"/>. A non-numeric attribute value matches
+    /// nothing, and non-numeric condition values are skipped — mirroring the engine's
+    /// <c>double.TryParse</c> semantics. There is deliberately no lexical string-compare
+    /// fallback: it produced matches the engine rejects (e.g. "gold" &gt; "abc"), #1456.
+    /// </summary>
+    private static bool CompareNumeric(string value, List<string> conditionValues, Func<double, double, bool> comparison)
     {
         // Use InvariantCulture for consistent numeric parsing across locales
-        if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var numValue) &&
-            double.TryParse(conditionValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var numCondition))
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var numValue))
         {
-            return numValue.CompareTo(numCondition);
+            return false;
         }
-        // If not numeric, fall back to string comparison
-        return string.Compare(value, conditionValue, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var conditionValue in conditionValues)
+        {
+            if (double.TryParse(conditionValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var numCondition) &&
+                comparison(numValue, numCondition))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    private static int CompareDateTime(string value, string conditionValue)
+    /// <summary>
+    /// Returns true when comparing <paramref name="value"/> as a date/time against any condition
+    /// value satisfies <paramref name="comparison"/>. Values are parsed to UTC-normalized
+    /// <see cref="DateTimeOffset"/> (see <see cref="TryParseDateTime"/>), so timezone offsets are
+    /// compared by instant rather than wall-clock. An unparseable attribute value matches nothing,
+    /// and unparseable condition values are skipped — mirroring the engine's <c>CompareDateTime</c>.
+    /// There is deliberately no lexical string-compare fallback: it produced matches the engine
+    /// rejects (e.g. unparseable input wrongly matching), #1455.
+    /// </summary>
+    private static bool CompareDateTime(string value, List<string> conditionValues, Func<DateTimeOffset, DateTimeOffset, bool> comparison)
     {
-        // Use InvariantCulture for consistent date parsing across locales
-        if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateValue) &&
-            DateTime.TryParse(conditionValue, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateCondition))
+        if (!TryParseDateTime(value, out var dateValue))
         {
-            return dateValue.CompareTo(dateCondition);
+            return false;
         }
-        // If not valid dates, fall back to string comparison
-        return string.Compare(value, conditionValue, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var conditionValue in conditionValues)
+        {
+            if (TryParseDateTime(conditionValue, out var conditionDate) && comparison(dateValue, conditionDate))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    private string ResolveServeConfig(ServeConfig serve, EvaluationContext context, string flagKey)
+    /// <summary>
+    /// Parses <paramref name="value"/> into a UTC-normalized <see cref="DateTimeOffset"/>. Accepts
+    /// ISO-8601 timestamps (offset-bearing or offset-less, with offset-less assumed UTC) and a
+    /// fallback of unix seconds since the epoch. Returns false when the value is neither — mirroring
+    /// the engine's <c>TryParseDateTime</c>.
+    /// </summary>
+    private static bool TryParseDateTime(string value, out DateTimeOffset result)
+    {
+        // Use InvariantCulture for consistent date parsing across locales. AssumeUniversal treats
+        // offset-less input as UTC; AdjustToUniversal normalizes offset-bearing input to UTC.
+        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out result))
+        {
+            return true;
+        }
+
+        // Try unix timestamp (seconds since epoch)
+        if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unixSeconds))
+        {
+            try
+            {
+                result = DateTimeOffset.FromUnixTimeSeconds(unixSeconds);
+                return true;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private string ResolveServeConfig(ServeConfig serve, EvaluationContext context)
     {
         if (serve.Type == ServeType.Fixed)
         {
@@ -354,14 +503,25 @@ internal sealed class FlagEvaluator
         // Rollout
         var bucketBy = serve.BucketBy ?? "userId";
         var bucketValue = ConvertToString(context.GetAttribute(bucketBy));
-        var salt = serve.Salt ?? flagKey;
-
-        var bucket = CalculateBucket(salt, bucketValue);
 
         if (serve.Variations == null || serve.Variations.Count == 0)
         {
             return serve.Variation ?? string.Empty;
         }
+
+        // Keyless user contexts can't be bucketed. Rather than hashing the empty value
+        // into an arbitrary salt-dependent bucket, serve the control (first) variation
+        // deterministically. The engine assigns a random GUID per eval (spreading
+        // anonymous users over HTTP); local SDK eval is deterministic, so parity is
+        // guaranteed only for keyed contexts (#1457).
+        if (string.IsNullOrEmpty(bucketValue) && (bucketBy == "userId" || bucketBy == "user_id"))
+        {
+            return serve.Variations[0].Key;
+        }
+
+        var salt = serve.Salt ?? "";
+
+        var bucket = CalculateBucket(salt, bucketValue);
 
         var cumulativeWeight = 0;
         foreach (var variation in serve.Variations)

@@ -24,7 +24,12 @@ internal enum ConditionOperator
     GreaterThanOrEqual,
     LessThanOrEqual,
     Before,
-    After
+    After,
+    SemverEquals,
+    SemverGreaterThan,
+    SemverGreaterThanOrEqual,
+    SemverLessThan,
+    SemverLessThanOrEqual
 }
 
 internal enum ConditionLogic

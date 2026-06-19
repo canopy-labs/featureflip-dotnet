@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Featureflip.Client</RootNamespace>
     <PackageId>Featureflip.Client.Extensions.DependencyInjection</PackageId>
-    <Version>2.1.0</Version>
+    <Version>2.2.0</Version>
     <Description>Dependency injection extensions for Featureflip.Client</Description>
   </PropertyGroup>
 
