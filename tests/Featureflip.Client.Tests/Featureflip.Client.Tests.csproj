@@ -18,4 +18,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Featureflip.Client\Featureflip.Client.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="golden\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

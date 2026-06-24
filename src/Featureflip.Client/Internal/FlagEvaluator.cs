@@ -537,7 +537,7 @@ internal sealed class FlagEvaluator
         return serve.Variations[serve.Variations.Count - 1].Key;
     }
 
-    private static int CalculateBucket(string salt, string value)
+    internal static int CalculateBucket(string salt, string value)
     {
         var input = $"{salt}:{value}";
         var inputBytes = Encoding.UTF8.GetBytes(input);
