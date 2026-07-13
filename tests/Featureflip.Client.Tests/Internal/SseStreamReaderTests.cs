@@ -187,4 +187,23 @@ public class SseStreamReaderTests
         Assert.Single(events);
         Assert.Equal("my-flag", events[0].FlagKey);
     }
+
+    [Fact]
+    public async Task Sync_ParsesFullSnapshot()
+    {
+        // The connect-time full snapshot the server sends first on (re)connect —
+        // same shape as GET /v1/sdk/flags. Carried whole so the core can REPLACE.
+        var snapshot = """{"environment":"test","version":5,"flags":[{"key":"flag-new","version":5,"type":"Boolean","enabled":true,"variations":[{"key":"on","value":true},{"key":"off","value":false}],"rules":[],"fallthrough":{"type":"Fixed","variation":"on"},"offVariation":"off"}],"segments":[]}""";
+        var sse = SseMessage("sync", snapshot);
+        using var reader = CreateReader(sse);
+
+        var events = new List<SseEvent>();
+        await foreach (var e in reader.ReadEventsAsync())
+            events.Add(e);
+
+        Assert.Single(events);
+        Assert.Equal(SseEventType.Sync, events[0].Type);
+        Assert.NotNull(events[0].Snapshot);
+        Assert.Contains(events[0].Snapshot!.Flags, f => f.Key == "flag-new");
+    }
 }

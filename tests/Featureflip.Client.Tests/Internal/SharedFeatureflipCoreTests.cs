@@ -90,4 +90,69 @@ public class SharedFeatureflipCoreTests
 
         Assert.True(detail.Value);
     }
+
+    [Fact]
+    public async Task ProcessSse_Sync_ReplacesStore_DroppingStaleFlags()
+    {
+        var store = new FlagStore();
+        // Pre-seed a stale flag the snapshot does NOT contain.
+        store.Replace(
+            new List<FlagConfiguration> { TestFlags.BoolFlag("flag-stale", enabled: true, variation: "on") },
+            new List<Segment>());
+        using var core = SharedFeatureflipCore.CreateForTesting(store);
+
+        var snapshot = new GetFlagsResponse
+        {
+            Flags = new List<FlagConfiguration> { TestFlags.BoolFlag("flag-new", enabled: true, variation: "on") },
+            Segments = new List<Segment>()
+        };
+        await core.ProcessSseEventAsync(new SseEvent { Type = SseEventType.Sync, Snapshot = snapshot });
+
+        Assert.True(store.TryGetFlag("flag-new", out _));
+        // Full REPLACE, not merge: a flag absent from the snapshot is dropped.
+        Assert.False(store.TryGetFlag("flag-stale", out _));
+    }
+
+    [Fact]
+    public async Task ProcessSse_Sync_WithNullFlags_DoesNotThrow_AndClearsStore()
+    {
+        var store = new FlagStore();
+        store.Replace(
+            new List<FlagConfiguration> { TestFlags.BoolFlag("flag-stale", enabled: true, variation: "on") },
+            new List<Segment>());
+        using var core = SharedFeatureflipCore.CreateForTesting(store);
+
+        // A `"flags": null` sync payload deserializes Snapshot.Flags to null; the
+        // sync handler must treat it as empty, not NRE (which would leave the
+        // store stale).
+        var snapshot = new GetFlagsResponse { Flags = null!, Segments = null! };
+        await core.ProcessSseEventAsync(new SseEvent { Type = SseEventType.Sync, Snapshot = snapshot });
+
+        Assert.Empty(store.GetAllFlags());
+        Assert.Empty(store.GetAllSegments());
+    }
+
+    [Fact]
+    public void ComputeReconnectDelay_IsNeverZero_Escalates_AndCapsWithJitter()
+    {
+        var baseDelay = TimeSpan.FromSeconds(3);
+        var maxDelay = TimeSpan.FromSeconds(30);
+
+        // A healthy/clean reconnect (failures 0 or 1) waits the base delay — the
+        // anti-busy-loop guarantee: it is deterministic and strictly positive.
+        Assert.Equal(baseDelay, SharedFeatureflipCore.ComputeReconnectDelay(0, baseDelay, maxDelay));
+        Assert.Equal(baseDelay, SharedFeatureflipCore.ComputeReconnectDelay(1, baseDelay, maxDelay));
+        Assert.True(SharedFeatureflipCore.ComputeReconnectDelay(0, baseDelay, maxDelay) > TimeSpan.Zero);
+
+        // Escalates (with [d/2, d] jitter) but never below the base.
+        var two = SharedFeatureflipCore.ComputeReconnectDelay(2, baseDelay, maxDelay);
+        Assert.InRange(two, baseDelay, TimeSpan.FromSeconds(6));
+
+        // Caps at maxDelay with [max/2, max] jitter for large failure counts.
+        for (var failures = 6; failures <= 20; failures++)
+        {
+            var d = SharedFeatureflipCore.ComputeReconnectDelay(failures, baseDelay, maxDelay);
+            Assert.InRange(d, TimeSpan.FromSeconds(15), maxDelay);
+        }
+    }
 }

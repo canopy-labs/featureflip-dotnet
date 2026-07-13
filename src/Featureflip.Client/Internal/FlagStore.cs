@@ -17,14 +17,17 @@ internal sealed class FlagStore
     /// This handles flag deletions by replacing the entire store.
     /// Duplicate keys are handled by keeping the last occurrence.
     /// </summary>
-    public void Replace(IEnumerable<FlagConfiguration> flags, IEnumerable<Segment> segments)
+    public void Replace(IEnumerable<FlagConfiguration>? flags, IEnumerable<Segment>? segments)
     {
-        // Handle potential duplicate keys by using GroupBy and taking last
-        var flagDict = flags
+        // Treat null as empty: a `"flags": null` / `"segments": null` payload
+        // deserializes the response collections to null (System.Text.Json
+        // overrides the property default), and a null sync snapshot must clear
+        // the store rather than NRE. Handle duplicate keys by keeping the last.
+        var flagDict = (flags ?? Enumerable.Empty<FlagConfiguration>())
             .GroupBy(f => f.Key)
             .ToImmutableDictionary(g => g.Key, g => g.Last());
 
-        var segmentDict = segments
+        var segmentDict = (segments ?? Enumerable.Empty<Segment>())
             .GroupBy(s => s.Key)
             .ToImmutableDictionary(g => g.Key, g => g.Last());
 

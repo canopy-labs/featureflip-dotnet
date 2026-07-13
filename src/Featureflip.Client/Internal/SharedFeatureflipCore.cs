@@ -17,6 +17,21 @@ internal sealed class SharedFeatureflipCore : IDisposable
         PropertyNameCaseInsensitive = true
     };
 
+    // SSE reconnect backoff (mirrors go/python: 3s base, 30s cap). Applied on
+    // every reconnect — including a clean/immediate EOF — so a persistently
+    // EOF-ing stream cannot busy-loop the reconnect (GAP 6).
+    private static readonly TimeSpan SseReconnectBaseDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan SseReconnectMaxDelay = TimeSpan.FromSeconds(30);
+
+    // Liveness watchdog: reconnect if no bytes (not even the ~30s server ping)
+    // arrive within this window (≈3 missed pings). Without it a half-open socket
+    // (silent LB/NAT idle-drop, no FIN/RST) would block the reader forever on the
+    // infinite stream read timeout and never reconnect/fall back. Reset on every
+    // received event. (On netstandard2.0 the between-reads reset can't interrupt
+    // a blocked ReadLineAsync — no cancellable overload — so there the watchdog
+    // only bounds the connect phase.)
+    private static readonly TimeSpan SseIdleTimeout = TimeSpan.FromSeconds(90);
+
     private readonly FlagStore _store;
     private readonly FlagEvaluator _evaluator;
     private readonly EventProcessor _eventProcessor;
@@ -420,6 +435,46 @@ internal sealed class SharedFeatureflipCore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Capped exponential reconnect backoff. Returns <paramref name="baseDelay"/> for
+    /// a healthy/clean reconnect (failures &lt;= 1) — deterministic and strictly
+    /// positive so a clean EOF can never busy-loop — then doubles with [d/2, d]
+    /// jitter up to <paramref name="maxDelay"/>. Never terminal: there is no
+    /// maximum retry count.
+    /// </summary>
+    internal static TimeSpan ComputeReconnectDelay(int consecutiveFailures, TimeSpan baseDelay, TimeSpan maxDelay)
+    {
+        if (consecutiveFailures <= 1) return baseDelay;
+        var delay = baseDelay;
+        for (var i = 1; i < consecutiveFailures; i++)
+        {
+            delay += delay; // double
+            if (delay >= maxDelay) return WithJitter(maxDelay);
+        }
+        return WithJitter(delay);
+    }
+
+    // Returns a value in [d/2, d] to de-correlate reconnects across many SDK
+    // instances (thundering-herd avoidance after a shared outage).
+    private static TimeSpan WithJitter(TimeSpan d)
+    {
+        if (d <= TimeSpan.Zero) return d;
+        var half = d.Ticks / 2;
+        return TimeSpan.FromTicks(half + (long)(NextJitter() * half));
+    }
+
+#if NETSTANDARD2_0
+    private static readonly Random _jitterRng = new Random();
+    private static double NextJitter()
+    {
+        // Random is not thread-safe; the reconnect loop is single-threaded per core,
+        // but lock defensively — jitter quality is non-critical.
+        lock (_jitterRng) return _jitterRng.NextDouble();
+    }
+#else
+    private static double NextJitter() => Random.Shared.NextDouble();
+#endif
+
     private async Task RefreshLoopAsync(CancellationToken ct)
     {
         // Wait for initialization to complete first to avoid race conditions
@@ -446,13 +501,22 @@ internal sealed class SharedFeatureflipCore : IDisposable
             // Initialization timed out or failed, proceed anyway - SSE/polling will initialize
         }
 
+        var sseFailures = 0;
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 if (_options.Streaming)
                 {
-                    await RefreshViaSseAsync(ct).ConfigureAwait(false);
+                    var reached = await RefreshViaSseAsync(ct).ConfigureAwait(false);
+                    sseFailures = reached ? 0 : sseFailures + 1;
+
+                    // Always back off before reconnecting the stream. A clean/immediate
+                    // EOF returns without throwing, so without this delay the loop would
+                    // busy-reconnect (GAP 6). A healthy stream resets to the base delay;
+                    // repeated failures escalate up to the cap. Never terminal.
+                    var reconnectDelay = ComputeReconnectDelay(sseFailures, SseReconnectBaseDelay, SseReconnectMaxDelay);
+                    await Task.Delay(reconnectDelay, ct).ConfigureAwait(false);
                 }
                 else
                 {
@@ -465,40 +529,66 @@ internal sealed class SharedFeatureflipCore : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Error in refresh loop, will retry in {Interval}s",
-                    _options.PollInterval.TotalSeconds);
-                await Task.Delay(_options.PollInterval, ct).ConfigureAwait(false);
+                sseFailures++;
+                var reconnectDelay = ComputeReconnectDelay(sseFailures, SseReconnectBaseDelay, SseReconnectMaxDelay);
+                _logger.LogWarning(ex, "Error in refresh loop, will retry in {Interval}s", reconnectDelay.TotalSeconds);
+                await Task.Delay(reconnectDelay, ct).ConfigureAwait(false);
             }
         }
     }
 
-    private async Task RefreshViaSseAsync(CancellationToken ct)
+    private async Task<bool> RefreshViaSseAsync(CancellationToken ct)
     {
-        if (_httpClient == null) return;
+        if (_httpClient == null) return false;
 
         _logger.LogDebug("Connecting to SSE stream");
+        var reached = false;
+
+        // Liveness watchdog (see SseIdleTimeout): cancel the read if no bytes
+        // arrive for the idle window, so a half-open socket reconnects instead of
+        // blocking forever. Reset on every event below.
+        using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        idleCts.CancelAfter(SseIdleTimeout);
 
         try
         {
-            using var stream = await _httpClient.GetStreamAsync(ct).ConfigureAwait(false);
+            using var stream = await _httpClient.GetStreamAsync(idleCts.Token).ConfigureAwait(false);
             using var reader = new SseStreamReader(stream, _logger);
 
             _logger.LogInformation("Connected to SSE stream for real-time updates");
 
-            await foreach (var evt in reader.ReadEventsAsync(ct).ConfigureAwait(false))
+            await foreach (var evt in reader.ReadEventsAsync(idleCts.Token).ConfigureAwait(false))
             {
+                idleCts.CancelAfter(SseIdleTimeout); // liveness: a ping/event proves the socket is alive
+                // Only a `sync` frame (the full connect snapshot) counts as a
+                // healthy reach that resets the failure counter — a lone ping (or
+                // stray delta) then EOF must not mask a persistently-broken stream
+                // and keep the polling fallback from arming.
+                if (evt.Type == SseEventType.Sync) reached = true;
                 await ProcessSseEventAsync(evt).ConfigureAwait(false);
             }
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogWarning(ex, "SSE connection failed, falling back to polling");
-            // Fall back to polling on connection failure
-            await RefreshViaPollingAsync(ct).ConfigureAwait(false);
+            // Connection/auth failure (e.g. 401/403/5xx during an outage). NOT
+            // terminal — do a single corrective poll to keep last-known-good
+            // fresh, then let the loop's reconnect backoff handle the wait (do
+            // NOT also wait a full PollInterval here — that double-delays reconnect).
+            _logger.LogWarning(ex, "SSE connection failed, polling once then retrying stream");
+            await PollOnceAsync(ct).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (idleCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // Idle watchdog fired while connecting (no bytes within the window) —
+            // half-open socket. Return so the loop reconnects/backs off; a
+            // shutdown cancellation (ct) is rethrown for the loop to break on.
+            _logger.LogWarning("SSE stream idle for {Timeout}s; reconnecting", SseIdleTimeout.TotalSeconds);
+        }
+
+        return reached;
     }
 
-    private async Task ProcessSseEventAsync(SseEvent evt)
+    internal async Task ProcessSseEventAsync(SseEvent evt)
     {
         switch (evt.Type)
         {
@@ -548,6 +638,18 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 }
                 break;
 
+            case SseEventType.Sync:
+                // Full config snapshot on (re)connect. Replace the whole store so
+                // flags changed — or deleted — during a disconnect are re-synced.
+                // Full replace, never merge (mirrors polling + segment.updated).
+                if (evt.Snapshot != null)
+                {
+                    _store.Replace(evt.Snapshot.Flags, evt.Snapshot.Segments);
+                    MarkInitializedIfNeeded();
+                    _logger.LogDebug("SSE sync: replaced store with {FlagCount} flags", evt.Snapshot.Flags?.Count ?? 0);
+                }
+                break;
+
             case SseEventType.Ping:
                 break;
         }
@@ -565,6 +667,15 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
     private async Task RefreshViaPollingAsync(CancellationToken ct)
     {
+        await PollOnceAsync(ct).ConfigureAwait(false);
+        await Task.Delay(_options.PollInterval, ct).ConfigureAwait(false);
+    }
+
+    // A single corrective poll with no trailing interval wait — used by the
+    // SSE-failure path, where the reconnect loop already applies its own backoff.
+    // RefreshViaPollingAsync (the non-streaming poll loop) adds the interval delay.
+    private async Task PollOnceAsync(CancellationToken ct)
+    {
         try
         {
             await LoadFlagsAsync(ct).ConfigureAwait(false);
@@ -579,8 +690,6 @@ internal sealed class SharedFeatureflipCore : IDisposable
         {
             _logger.LogWarning(ex, "Failed to refresh flags via polling");
         }
-
-        await Task.Delay(_options.PollInterval, ct).ConfigureAwait(false);
     }
 
     private async Task FlushLoopAsync(CancellationToken ct)

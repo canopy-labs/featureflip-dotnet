@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Featureflip.Client.Internal.Models;
 using Microsoft.Extensions.Logging;
 
 namespace Featureflip.Client.Internal;
@@ -9,6 +11,15 @@ namespace Featureflip.Client.Internal;
 /// </summary>
 internal sealed class SseStreamReader : IDisposable
 {
+    // Deserializer for the `sync` snapshot payload — same shape/options as the
+    // GET /v1/sdk/flags response (camelCase properties, string enums).
+    private static readonly JsonSerializerOptions SnapshotJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter(namingPolicy: null) }
+    };
+
     private readonly Stream _stream;
     private readonly ILogger _logger;
     private readonly StreamReader _reader;
@@ -104,6 +115,7 @@ internal sealed class SseStreamReader : IDisposable
                 "flag.updated" => ParseFlagEvent(data, SseEventType.FlagUpdated),
                 "flag.deleted" => ParseFlagEvent(data, SseEventType.FlagDeleted),
                 "segment.updated" => new SseEvent { Type = SseEventType.SegmentUpdated },
+                "sync" => ParseSyncEvent(data),
                 "ping" => new SseEvent { Type = SseEventType.Ping },
                 _ => null
             };
@@ -124,6 +136,15 @@ internal sealed class SseStreamReader : IDisposable
         return new SseEvent { Type = type, FlagKey = key, Version = version };
     }
 
+    private static SseEvent ParseSyncEvent(string data)
+    {
+        // Full config snapshot the server sends on (re)connect. Carried whole so
+        // the core can apply it as a store REPLACE (drop flags absent from it),
+        // re-syncing anything changed/deleted during a disconnect.
+        var snapshot = JsonSerializer.Deserialize<GetFlagsResponse>(data, SnapshotJsonOptions);
+        return new SseEvent { Type = SseEventType.Sync, Snapshot = snapshot };
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -139,6 +160,7 @@ internal enum SseEventType
     FlagUpdated,
     FlagDeleted,
     SegmentUpdated,
+    Sync,
     Ping
 }
 
@@ -147,4 +169,5 @@ internal sealed class SseEvent
     public SseEventType Type { get; init; }
     public string? FlagKey { get; init; }
     public int? Version { get; init; }
+    public GetFlagsResponse? Snapshot { get; init; }
 }

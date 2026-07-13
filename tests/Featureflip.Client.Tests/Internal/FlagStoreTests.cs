@@ -236,6 +236,26 @@ public class FlagStoreTests
     }
 
     [Fact]
+    public void FlagStore_Replace_WithNullCollections_TreatsAsEmpty()
+    {
+        // A `"flags": null` / `"segments": null` payload deserializes the DTO
+        // collections to null (System.Text.Json overrides the property default),
+        // so Replace must treat null as empty rather than NRE — otherwise a null
+        // sync snapshot silently fails to apply and the store stays stale.
+        var store = new FlagStore();
+        store.Replace(
+            new List<FlagConfiguration> { CreateFlag("flag-1") },
+            new List<Segment> { CreateSegment("segment-1") });
+
+        // Act — null collections must not throw.
+        store.Replace(null!, null!);
+
+        // Assert — replaced with empty, no exception.
+        Assert.Empty(store.GetAllFlags());
+        Assert.Empty(store.GetAllSegments());
+    }
+
+    [Fact]
     public void FlagStore_Replace_HandlesDuplicateKeys()
     {
         // Arrange
