@@ -761,5 +761,31 @@ internal sealed class SharedFeatureflipCore : IDisposable
         }
     }
 
+    public Task WaitForInitializationAsync(CancellationToken cancellationToken = default)
+    {
+        var initTask = _initializationTcs.Task;
+        if (initTask.IsCompleted || !cancellationToken.CanBeCanceled)
+        {
+            return initTask;
+        }
+
+        return WaitWithCancellationAsync(initTask, cancellationToken);
+    }
+
+    private static async Task WaitWithCancellationAsync(Task<bool> initTask, CancellationToken cancellationToken)
+    {
+        var cancelTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), cancelTcs))
+        {
+            var completed = await Task.WhenAny(initTask, cancelTcs.Task).ConfigureAwait(false);
+            if (completed != initTask)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
+
+        await initTask.ConfigureAwait(false);
+    }
+
     public void Dispose() => Release();
 }

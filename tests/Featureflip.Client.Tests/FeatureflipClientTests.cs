@@ -416,6 +416,31 @@ public class FeatureflipClientTests
         Assert.Equal("off", result.VariationKey);
     }
 
+    [Fact]
+    public async Task WaitForInitializationAsync_CompletesForInitializedClient()
+    {
+        var store = new FlagStore();
+        using var client = new FeatureflipClient(store, new FlagEvaluator(), new FeatureFlagOptions());
+
+        await client.WaitForInitializationAsync();
+
+        Assert.True(client.IsInitialized);
+    }
+
+    [Fact]
+    public async Task WaitForInitializationAsync_HonorsAlreadyCanceledToken_WhenPending()
+    {
+        // A test client is initialized immediately, so an already-canceled token
+        // must still complete (nothing left to wait for).
+        var store = new FlagStore();
+        using var client = new FeatureflipClient(store, new FlagEvaluator(), new FeatureFlagOptions());
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await client.WaitForInitializationAsync(cts.Token); // does not throw: init already done
+        Assert.True(client.IsInitialized);
+    }
+
     private static FeatureflipClient CreateTestClient(List<FlagConfiguration> flags)
     {
         var store = new FlagStore();

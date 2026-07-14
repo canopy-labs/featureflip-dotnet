@@ -43,4 +43,12 @@ public interface IFeatureflipClient : IDisposable
 
     /// <summary>Indicates whether the client has successfully initialized with flag data.</summary>
     bool IsInitialized { get; }
+
+    /// <summary>
+    /// Returns a task that completes once the client's initial flag load has
+    /// finished (or fallen back to offline). Completes immediately if already
+    /// initialized. Honors <paramref name="cancellationToken"/> only while the
+    /// load is still pending.
+    /// </summary>
+    Task WaitForInitializationAsync(CancellationToken cancellationToken = default);
 }

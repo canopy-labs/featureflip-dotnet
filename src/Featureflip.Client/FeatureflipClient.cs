@@ -180,6 +180,10 @@ public sealed class FeatureflipClient : IFeatureflipClient
     public bool IsInitialized => _core.IsInitialized;
 
     /// <inheritdoc />
+    public Task WaitForInitializationAsync(CancellationToken cancellationToken = default)
+        => _core.WaitForInitializationAsync(cancellationToken);
+
+    /// <inheritdoc />
     public T Variation<T>(string key, EvaluationContext context, T defaultValue)
     {
         var detail = _core.Evaluate<T>(key, context, defaultValue);
