@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Featureflip.Client.Internal.Models;
 using Microsoft.Extensions.Logging;
@@ -37,6 +38,13 @@ internal sealed class SharedFeatureflipCore : IDisposable
     private readonly EventProcessor _eventProcessor;
     private readonly FeatureFlagOptions _options;
     private readonly ILogger _logger;
+
+    // Snapshot of the configured evaluation inspectors, taken once at construction and
+    // never mutated afterwards. Immutable-after-init means the hot evaluation path can
+    // read it without any locking (see the design spec's rationale for rejecting
+    // runtime registration). Empty array when none are configured.
+    private readonly EvaluationInspector[] _inspectors;
+
     private readonly FeatureFlagHttpClient? _httpClient;
     private readonly CancellationTokenSource _cts;
     private readonly Task? _flushTask;
@@ -68,6 +76,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
         if (string.IsNullOrWhiteSpace(sdkKey)) throw new ArgumentException("SDK key is required.", nameof(sdkKey));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? NullLogger.Instance;
+        _inspectors = NormalizeInspectors(_options.Inspectors);
         _store = new FlagStore();
         _evaluator = new FlagEvaluator();
         _eventProcessor = new EventProcessor(_options.FlushInterval, _options.FlushBatchSize);
@@ -115,13 +124,14 @@ internal sealed class SharedFeatureflipCore : IDisposable
     /// Test-only constructor. No HTTP client, no background tasks. Used by unit tests
     /// and by FeatureflipClient's internal test constructor.
     /// </summary>
-    private SharedFeatureflipCore(FlagStore store, FlagEvaluator evaluator, FeatureFlagOptions options)
+    private SharedFeatureflipCore(FlagStore store, FlagEvaluator evaluator, FeatureFlagOptions options, ILogger? logger)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _eventProcessor = new EventProcessor(options.FlushInterval, options.FlushBatchSize);
-        _logger = NullLogger.Instance;
+        _logger = logger ?? NullLogger.Instance;
+        _inspectors = NormalizeInspectors(_options.Inspectors);
         _httpClient = null;
         _cts = new CancellationTokenSource();
         _initializationTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -140,12 +150,21 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
     internal static SharedFeatureflipCore CreateForTesting(FlagStore store)
     {
-        return new SharedFeatureflipCore(store, new FlagEvaluator(), new FeatureFlagOptions());
+        return new SharedFeatureflipCore(store, new FlagEvaluator(), new FeatureFlagOptions(), logger: null);
     }
 
     internal static SharedFeatureflipCore CreateForTesting(FlagStore store, FlagEvaluator evaluator, FeatureFlagOptions options)
     {
-        return new SharedFeatureflipCore(store, evaluator, options);
+        return new SharedFeatureflipCore(store, evaluator, options, logger: null);
+    }
+
+    internal static SharedFeatureflipCore CreateForTesting(
+        FlagStore store,
+        FlagEvaluator evaluator,
+        FeatureFlagOptions options,
+        ILogger logger)
+    {
+        return new SharedFeatureflipCore(store, evaluator, options, logger);
     }
 
     /// <summary>
@@ -231,12 +250,28 @@ internal sealed class SharedFeatureflipCore : IDisposable
     }
 
     /// <summary>Evaluates a flag and returns full detail. Does not track the evaluation event.</summary>
+    /// <remarks>
+    /// This is the single evaluation choke point — every <c>BoolVariation</c>/
+    /// <c>StringVariation</c>/<c>VariationDetail</c>/… call funnels through it. Registered
+    /// evaluation inspectors are notified exactly once per call, on every exit path, with
+    /// the reason and value the caller actually receives — except after the core has shut
+    /// down, where the evaluation still returns its usual value but fires no inspectors.
+    /// </remarks>
     public EvaluationDetail<T> Evaluate<T>(string key, EvaluationContext context, T defaultValue)
     {
         try
         {
             if (!_store.TryGetFlag(key, out var flag) || flag == null)
             {
+                NotifyInspectors(
+                    key,
+                    context,
+                    defaultValue,
+                    EvaluationReason.FlagNotFound,
+                    variationKey: null,
+                    ruleId: null,
+                    prerequisiteKey: null);
+
                 return new EvaluationDetail<T>(
                     defaultValue,
                     EvaluationReason.FlagNotFound,
@@ -257,6 +292,19 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
             if (variation == null)
             {
+                // Malformed config: the evaluator picked a variation key the flag doesn't
+                // define. Reported as the contract's Error path — variationKey/ruleId/
+                // prerequisiteKey stay null there, even though the returned detail still
+                // carries them for diagnostics.
+                NotifyInspectors(
+                    key,
+                    context,
+                    defaultValue,
+                    EvaluationReason.Error,
+                    variationKey: null,
+                    ruleId: null,
+                    prerequisiteKey: null);
+
                 return new EvaluationDetail<T>(
                     defaultValue,
                     EvaluationReason.Error,
@@ -267,16 +315,120 @@ internal sealed class SharedFeatureflipCore : IDisposable
             }
 
             var value = DeserializeValue(variation.Value, defaultValue);
+
+            NotifyInspectors(
+                key,
+                context,
+                value,
+                result.Reason,
+                result.VariationKey,
+                result.RuleId,
+                result.PrerequisiteKey);
+
             return new EvaluationDetail<T>(value, result.Reason, result.RuleId, null, result.VariationKey, result.PrerequisiteKey);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error evaluating flag {FlagKey}", key);
+
+            NotifyInspectors(
+                key,
+                context,
+                defaultValue,
+                EvaluationReason.Error,
+                variationKey: null,
+                ruleId: null,
+                prerequisiteKey: null);
+
             return new EvaluationDetail<T>(
                 defaultValue,
                 EvaluationReason.Error,
                 null,
                 ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Drops null entries from the configured inspector collection and freezes the
+    /// remainder into an array. Callers bypass nullable reference annotations at
+    /// runtime, so a null entry is dropped here rather than throwing on the hot path.
+    /// </summary>
+    private static EvaluationInspector[] NormalizeInspectors(IList<EvaluationInspector>? configured)
+    {
+        if (configured == null || configured.Count == 0)
+        {
+            return Array.Empty<EvaluationInspector>();
+        }
+
+        List<EvaluationInspector>? kept = null;
+        foreach (var inspector in configured)
+        {
+            if (inspector is null) continue;
+            kept ??= new List<EvaluationInspector>(configured.Count);
+            kept.Add(inspector);
+        }
+
+        return kept == null ? Array.Empty<EvaluationInspector>() : kept.ToArray();
+    }
+
+    /// <summary>
+    /// Fires the registered evaluation inspectors. Called once per variation call on
+    /// every exit path of <see cref="Evaluate{T}"/>. Never throws: a throwing inspector
+    /// is isolated so it neither changes the value the caller receives nor stops the
+    /// remaining inspectors. Notification is suppressed once the core has shut down.
+    /// </summary>
+    private void NotifyInspectors<T>(
+        string flagKey,
+        EvaluationContext context,
+        T value,
+        EvaluationReason reason,
+        string? variationKey,
+        string? ruleId,
+        string? prerequisiteKey)
+    {
+        // Hot path: with no inspectors registered, allocate nothing and return.
+        var inspectors = _inspectors;
+        if (inspectors.Length == 0) return;
+
+        // A closed client emits no inspector events (cross-SDK contract). The core is
+        // shut down once its last handle is disposed, which is the same lifecycle flag
+        // TrackEvaluation/Flush already gate on — no new state. This suppresses the
+        // notification ONLY: a post-dispose evaluation still returns exactly the value
+        // it would have returned before, because the guard is here and not in Evaluate.
+        if (IsShutDown) return;
+
+        EvaluationEvent evaluationEvent;
+        try
+        {
+            evaluationEvent = new EvaluationEvent(
+                flagKey,
+                context?.Copy() ?? new EvaluationContext(),
+                value,
+                variationKey,
+                reason,
+                ruleId,
+                prerequisiteKey,
+                DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex)
+        {
+            // Building the event must never disturb evaluation (e.g. a caller mutating
+            // its own context concurrently). Skip this notification rather than letting
+            // the throw reach Evaluate's catch and double-fire the inspectors.
+            _logger.LogWarning(ex, "Failed to build evaluation inspector event for flag {FlagKey}", flagKey);
+            return;
+        }
+
+        foreach (var inspector in inspectors)
+        {
+            try
+            {
+                inspector(evaluationEvent);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Evaluation inspector threw for flag {FlagKey}", flagKey);
+            }
         }
     }
 

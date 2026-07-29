@@ -41,4 +41,19 @@ public class FeatureFlagOptions
     /// Default is false to fail fast on configuration errors.
     /// </summary>
     public bool StartOffline { get; set; } = false;
+
+    /// <summary>
+    /// In-process observers invoked synchronously on every flag evaluation, on every
+    /// exit path (success, flag-not-found, error). Use these to pipe exposures into
+    /// your own analytics tooling.
+    /// </summary>
+    /// <remarks>
+    /// Honored on the <b>first</b> <see cref="FeatureflipClient.Get"/> call for a given
+    /// SDK key, like every other option — the shared core snapshots (and copies) this
+    /// collection at construction, so later mutations are ignored and the read path
+    /// needs no locking. Null entries are dropped defensively. Deliberately excluded
+    /// from the "different options" equality check: delegates are not structurally
+    /// comparable, and a differing callback must not trigger a spurious warning.
+    /// </remarks>
+    public IList<EvaluationInspector> Inspectors { get; set; } = new List<EvaluationInspector>();
 }

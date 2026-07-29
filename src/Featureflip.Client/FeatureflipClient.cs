@@ -162,6 +162,10 @@ public sealed class FeatureflipClient : IFeatureflipClient
         }
     }
 
+    // NOTE: FeatureFlagOptions.Inspectors is deliberately excluded — delegates are not
+    // structurally comparable, and a differing callback must not trigger the spurious
+    // "different options" warning. Like every other option, inspectors are honored on
+    // the first Get() for a given SDK key.
     private static bool OptionsEqual(FeatureFlagOptions a, FeatureFlagOptions b)
     {
         return a.BaseUrl == b.BaseUrl

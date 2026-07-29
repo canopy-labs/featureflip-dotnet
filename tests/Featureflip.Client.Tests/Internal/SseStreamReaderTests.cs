@@ -206,4 +206,100 @@ public class SseStreamReaderTests
         Assert.NotNull(events[0].Snapshot);
         Assert.Contains(events[0].Snapshot!.Flags, f => f.Key == "flag-new");
     }
+
+    [Fact]
+    public async Task Sync_DataSplitAcrossMultipleLines_IsJoinedBeforeParsing()
+    {
+        // Per the SSE spec, multiple `data:` lines in one event join with "\n".
+        // Split a sync snapshot after a comma so neither line is valid JSON alone —
+        // an overwrite instead of a join would drop the second half. Mirrors go's
+        // TestStreaming_ConcatenatesMultiLineData; covers SseStreamReader.cs:95-99.
+        var sse = "event: sync\n"
+            + "data: {\"environment\":\"test\",\"version\":7,\"flags\":[{\"key\":\"split-flag\",\"version\":7,\n"
+            + "data: \"type\":\"Boolean\",\"enabled\":true,\"variations\":[{\"key\":\"on\",\"value\":true},"
+              + "{\"key\":\"off\",\"value\":false}],\"rules\":[],\"fallthrough\":{\"type\":\"Fixed\","
+              + "\"variation\":\"on\"},\"offVariation\":\"off\"}],\"segments\":[]}\n"
+            + "\n";
+        using var reader = CreateReader(sse);
+
+        var events = new List<SseEvent>();
+        await foreach (var e in reader.ReadEventsAsync())
+            events.Add(e);
+
+        Assert.Single(events);
+        Assert.Equal(SseEventType.Sync, events[0].Type);
+        Assert.NotNull(events[0].Snapshot);
+        Assert.Contains(events[0].Snapshot!.Flags, f => f.Key == "split-flag");
+    }
+
+    [Fact]
+    public async Task Sync_LargeSnapshot_OverChunkedStream_IsFullyReassembled()
+    {
+        // The shared >64 KiB sync fixture, delivered in tiny chunks, proves
+        // StreamReader.ReadLineAsync reassembles an oversized single `data:` line
+        // across read boundaries and ParseSyncEvent deserializes the full snapshot.
+        var fixture = (await File.ReadAllTextAsync(
+            Path.Combine(AppContext.BaseDirectory, "golden", "snapshot.json"))).Trim();
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(fixture) > 64 * 1024,
+            "snapshot.json fixture must exceed 64 KiB");
+
+        var sse = $"event: sync\ndata: {fixture}\n\n";
+        var bytes = System.Text.Encoding.UTF8.GetBytes(sse);
+        using var reader = new SseStreamReader(new ChunkedStream(bytes, 64), NullLogger.Instance);
+
+        var events = new List<SseEvent>();
+        await foreach (var e in reader.ReadEventsAsync())
+            events.Add(e);
+
+        Assert.Single(events);
+        Assert.Equal(SseEventType.Sync, events[0].Type);
+        Assert.NotNull(events[0].Snapshot);
+        Assert.Contains(events[0].Snapshot!.Flags, f => f.Key == "sync-canary");
+        Assert.True(events[0].Snapshot!.Flags.Count > 800,
+            "the full multi-flag snapshot should be parsed, not truncated at a chunk boundary");
+        // The snapshot's structural payload (not just flag keys) round-trips: a
+        // dropped segment/rich field would otherwise be swallowed by unknown-member skip.
+        Assert.Contains(events[0].Snapshot!.Segments, s => s.Key == "snapshot-segment");
+    }
+
+    // A read-only Stream that returns at most `chunk` bytes per read, forcing
+    // ReadLineAsync to reassemble a line across many underlying reads.
+    private sealed class ChunkedStream : Stream
+    {
+        private readonly byte[] _data;
+        private readonly int _chunk;
+        private int _pos;
+        public ChunkedStream(byte[] data, int chunk) { _data = data; _chunk = chunk; }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_pos >= _data.Length) return 0;
+            var n = Math.Min(Math.Min(_chunk, count), _data.Length - _pos);
+            Array.Copy(_data, _pos, buffer, offset, n);
+            _pos += n;
+            return n;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+            => Task.FromResult(Read(buffer, offset, count));
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            if (_pos >= _data.Length) return new ValueTask<int>(0);
+            var n = Math.Min(Math.Min(_chunk, buffer.Length), _data.Length - _pos);
+            _data.AsSpan(_pos, n).CopyTo(buffer.Span);
+            _pos += n;
+            return new ValueTask<int>(n);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _data.Length;
+        public override long Position { get => _pos; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }

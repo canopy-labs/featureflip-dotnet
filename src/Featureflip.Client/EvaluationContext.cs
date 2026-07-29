@@ -48,4 +48,26 @@ public sealed class EvaluationContext
             _ => null
         };
     }
+
+    /// <summary>
+    /// Returns a shallow copy of this context: the built-in fields plus a fresh
+    /// attribute dictionary holding the same attribute references. Used to hand
+    /// evaluation inspectors a context they cannot use to mutate the caller's object.
+    /// </summary>
+    internal EvaluationContext Copy()
+    {
+        var copy = new EvaluationContext
+        {
+            UserId = UserId,
+            Email = Email,
+            Country = Country
+        };
+
+        foreach (var attribute in _attributes)
+        {
+            copy._attributes[attribute.Key] = attribute.Value;
+        }
+
+        return copy;
+    }
 }
