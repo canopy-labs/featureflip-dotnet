@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.6.0 — 2026-07-29
+
+### Added
+
+- **`FlagsChanged` event.** `IFeatureflipClient` now raises `FlagsChanged` with the keys of flags whose configuration changed, so consumers can react to updates without polling. Batched (one raise per update), never raised for the initial flag load, and silent for unchanged poll ticks — `FlagStore` diffs each snapshot and resolves changed segments back to the flags whose rules reference them (#2080).
+- **Prerequisites resolve back to their dependents.** Toggling a flag that another lists as a prerequisite changes what the dependent evaluates to, but bumps only the prerequisite's own version — so dependents were silently absent from `ChangedKeys` and a consumer caching per key served them stale. Every notification path now fans out transitively through prerequisites: full snapshots (poll/`sync`) and the SSE deltas (`flag.created`/`flag.updated`/`flag.deleted`) alike. Cycle-safe (#2087).
+
+- **A variation carrying no usable value no longer breaks snapshot updates.** `Variation.Value` is a non-nullable `JsonElement`, which System.Text.Json leaves at `ValueKind.Undefined` for both an absent `value` property and an explicit `"value": null` — and a variation holding JSON null is supported config. Re-serializing such an element throws, so the content comparison below would have failed every full snapshot and frozen the store on its last good config. The comparison writes `Undefined` as null instead (#2088).
+- **Full-snapshot change detection compares configuration, not `version`.** The wire version is deliberately second-granular — eval-api divides its internal epoch-millisecond version by 1000 to keep the public contract 32-bit safe for published SDKs — so it cannot distinguish two edits to one flag inside the same wall-clock second. On a poll, SSE `sync`, or `segment.updated` refetch there is no per-edit signal to fall back on, so if a snapshot boundary fell between those two edits the newer config landed in the store while the diff reported nothing changed. `FlagStore` now compares each flag's and segment's serialized configuration, which also covers any field added to a config model without the comparison having to be extended by hand. Unchanged poll ticks stay silent as before (#2088).
+- **An SSE flag delta always raises `FlagsChanged`, with no version comparison.** The wire version is second-granular, so two edits to one flag inside the same wall-clock second carry an identical version — and the store applied the second edit's config while suppressing its notification, leaving a consumer that caches per key on the pre-edit value. Only `flag.created`/`flag.updated` reach this path and the server emits those only for a real change, so the event is the signal. Matches `@featureflip/js` (#2090).
+
+### Changed
+
+- **`IFeatureflipClient` gained a member.** Adding `FlagsChanged` is source-breaking for external implementors of the interface; netstandard2.0 support rules out a default interface method.
+
 ## 2.5.0 — 2026-07-29
 
 ### Added

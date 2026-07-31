@@ -22,6 +22,10 @@ public sealed class FeatureflipClient : IFeatureflipClient
     private readonly SharedFeatureflipCore _core;
     private int _disposed; // per-handle disposal flag; 0 = alive, 1 = disposed
 
+    // One core subscription per registered handler. Guarded by _flagsChangedLock.
+    private readonly object _flagsChangedLock = new();
+    private Dictionary<EventHandler<FlagsChangedEventArgs>, IDisposable>? _flagsChangedSubscriptions;
+
     /// <summary>
     /// Internal constructor retained for cases where a caller needs a standalone,
     /// non-cached client (e.g., specialized testing or embedding scenarios).
@@ -181,6 +185,65 @@ public sealed class FeatureflipClient : IFeatureflipClient
     }
 
     /// <inheritdoc />
+    public event EventHandler<FlagsChangedEventArgs> FlagsChanged
+    {
+        add
+        {
+            if (value == null) return;
+
+            lock (_flagsChangedLock)
+            {
+                if (Volatile.Read(ref _disposed) != 0) return;
+
+                _flagsChangedSubscriptions ??= new Dictionary<EventHandler<FlagsChangedEventArgs>, IDisposable>();
+                if (_flagsChangedSubscriptions.ContainsKey(value)) return;
+
+                var handler = value;
+                _flagsChangedSubscriptions[value] = _core.OnFlagsChanged(keys =>
+                {
+                    // Defense against an in-flight fan-out: SharedFeatureflipCore.NotifyFlagsChanged
+                    // snapshots its listener array before invoking, so a notification already under
+                    // way when this handle's Dispose runs can still reach this closure even after the
+                    // subscription has been (or is concurrently being) torn down. The spec promises
+                    // "never after the handle is disposed", absolutely, so guard here rather than
+                    // relying on removal timing alone.
+                    if (Volatile.Read(ref _disposed) != 0) return;
+
+                    // Copy per handler: `keys` is the single instance threaded through every
+                    // listener registered for this update (SharedFeatureflipCore.NotifyFlagsChanged
+                    // iterates one shared array), and its runtime type (HashSet<string> from
+                    // FlagStore.Replace/Upsert, or string[] from FlagStore.RemoveFlag) is castable
+                    // back out of IReadOnlyCollection<string> and mutable. Without a copy, one
+                    // handler downcasting and mutating it would corrupt what every other handler —
+                    // and every other handle sharing this core — observes for the same update.
+                    // Mirrors the JS reference's per-listener copy (packages/js-sdk/src/core/shared-core.ts:
+                    // listener([...keys])) — do not optimize this copy away.
+                    handler(this, new FlagsChangedEventArgs(new List<string>(keys)));
+                });
+            }
+        }
+        remove
+        {
+            if (value == null) return;
+
+            IDisposable? subscription = null;
+            lock (_flagsChangedLock)
+            {
+                if (_flagsChangedSubscriptions != null
+                    && _flagsChangedSubscriptions.TryGetValue(value, out subscription))
+                {
+                    _flagsChangedSubscriptions.Remove(value);
+                }
+            }
+
+            // Disposed outside the lock: unsubscribing reaches into the core's own
+            // listener lock, and taking the two in a fixed order everywhere avoids
+            // building a lock cycle.
+            subscription?.Dispose();
+        }
+    }
+
+    /// <inheritdoc />
     public bool IsInitialized => _core.IsInitialized;
 
     /// <inheritdoc />
@@ -233,6 +296,22 @@ public sealed class FeatureflipClient : IFeatureflipClient
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        Dictionary<EventHandler<FlagsChangedEventArgs>, IDisposable>? subscriptions;
+        lock (_flagsChangedLock)
+        {
+            subscriptions = _flagsChangedSubscriptions;
+            _flagsChangedSubscriptions = null;
+        }
+
+        if (subscriptions != null)
+        {
+            foreach (var subscription in subscriptions.Values)
+            {
+                subscription.Dispose();
+            }
+        }
+
         _core.Release();
     }
 }

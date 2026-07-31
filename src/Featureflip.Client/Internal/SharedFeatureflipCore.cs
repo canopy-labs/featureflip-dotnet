@@ -45,6 +45,13 @@ internal sealed class SharedFeatureflipCore : IDisposable
     // runtime registration). Empty array when none are configured.
     private readonly EvaluationInspector[] _inspectors;
 
+    // Per-handle flag-change listeners. Copy-on-write under _flagsChangedLock so the
+    // notification path reads one volatile field and iterates without locking.
+    private volatile Action<IReadOnlyCollection<string>>[] _flagsChangedListeners =
+        Array.Empty<Action<IReadOnlyCollection<string>>>();
+    private readonly object _flagsChangedLock = new();
+    private readonly IDisposable _storeSubscription;
+
     private readonly FeatureFlagHttpClient? _httpClient;
     private readonly CancellationTokenSource _cts;
     private readonly Task? _flushTask;
@@ -60,6 +67,10 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
     public int RefCount => Volatile.Read(ref _refCount);
     public bool IsShutDown => Volatile.Read(ref _isShutDown) != 0;
+
+    /// <summary>Diagnostic: current number of registered flag-change listeners. Test-only.</summary>
+    internal int FlagsChangedListenerCount => _flagsChangedListeners.Length;
+
     public FeatureFlagOptions Options => _options;
     public bool IsInitialized
     {
@@ -78,6 +89,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
         _logger = logger ?? NullLogger.Instance;
         _inspectors = NormalizeInspectors(_options.Inspectors);
         _store = new FlagStore();
+        _storeSubscription = _store.OnChange(NotifyFlagsChanged);
         _evaluator = new FlagEvaluator();
         _eventProcessor = new EventProcessor(_options.FlushInterval, _options.FlushBatchSize);
         _httpClient = new FeatureFlagHttpClient(sdkKey, _options);
@@ -127,6 +139,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
     private SharedFeatureflipCore(FlagStore store, FlagEvaluator evaluator, FeatureFlagOptions options, ILogger? logger)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
+        _storeSubscription = _store.OnChange(NotifyFlagsChanged);
         _evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _eventProcessor = new EventProcessor(options.FlushInterval, options.FlushBatchSize);
@@ -429,6 +442,91 @@ internal sealed class SharedFeatureflipCore : IDisposable
             {
                 _logger.LogWarning(ex, "Evaluation inspector threw for flag {FlagKey}", flagKey);
             }
+        }
+    }
+
+    /// <summary>
+    /// Registers a listener for flag-configuration changes. Dispose the returned handle to
+    /// unsubscribe. Listeners live on the shared core, so every handle for this SDK key
+    /// observes every update regardless of which handle registered.
+    /// </summary>
+    public IDisposable OnFlagsChanged(Action<IReadOnlyCollection<string>> listener)
+    {
+        if (listener == null) throw new ArgumentNullException(nameof(listener));
+
+        lock (_flagsChangedLock)
+        {
+            var current = _flagsChangedListeners;
+            var next = new Action<IReadOnlyCollection<string>>[current.Length + 1];
+            Array.Copy(current, next, current.Length);
+            next[current.Length] = listener;
+            _flagsChangedListeners = next;
+        }
+
+        return new FlagsChangedSubscription(this, listener);
+    }
+
+    private void RemoveFlagsChangedListener(Action<IReadOnlyCollection<string>> listener)
+    {
+        lock (_flagsChangedLock)
+        {
+            var current = _flagsChangedListeners;
+            var index = Array.IndexOf(current, listener);
+            if (index < 0) return;
+
+            if (current.Length == 1)
+            {
+                _flagsChangedListeners = Array.Empty<Action<IReadOnlyCollection<string>>>();
+                return;
+            }
+
+            var next = new Action<IReadOnlyCollection<string>>[current.Length - 1];
+            Array.Copy(current, 0, next, 0, index);
+            Array.Copy(current, index + 1, next, index, current.Length - index - 1);
+            _flagsChangedListeners = next;
+        }
+    }
+
+    /// <summary>
+    /// Fans a store change out to the registered listeners. The store's own notifier
+    /// swallows exceptions silently and has no logger, so isolation happens here: a
+    /// throwing listener neither skips its siblings nor escapes into the polling/SSE loop,
+    /// and is logged at warning. Suppressed once the core has shut down.
+    /// </summary>
+    private void NotifyFlagsChanged(IReadOnlyCollection<string> keys)
+    {
+        var listeners = _flagsChangedListeners;
+        if (listeners.Length == 0) return;
+        if (IsShutDown) return;
+
+        foreach (var listener in listeners)
+        {
+            try
+            {
+                listener(keys);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Flag-change listener threw for {ChangedFlagCount} changed flags", keys.Count);
+            }
+        }
+    }
+
+    private sealed class FlagsChangedSubscription : IDisposable
+    {
+        private SharedFeatureflipCore? _core;
+        private readonly Action<IReadOnlyCollection<string>> _listener;
+
+        public FlagsChangedSubscription(SharedFeatureflipCore core, Action<IReadOnlyCollection<string>> listener)
+        {
+            _core = core;
+            _listener = listener;
+        }
+
+        public void Dispose()
+        {
+            var core = Interlocked.Exchange(ref _core, null);
+            core?.RemoveFlagsChangedListener(_listener);
         }
     }
 
@@ -866,6 +964,8 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
     private void Shutdown()
     {
+        _storeSubscription.Dispose();
+
         if (_owningMap != null && _owningKey != null)
         {
             ((System.Collections.Generic.ICollection<System.Collections.Generic.KeyValuePair<string, SharedFeatureflipCore>>)_owningMap)

@@ -131,8 +131,12 @@ public class SharedFeatureflipCoreRecoveryTests
         finally
         {
             testTimeout.Cancel();
-            listener.Stop();
-            try { await serverTask; } catch { /* cancellation / listener-stop expected */ }
+            // Close, not Stop: the loop may be parked in GetContextAsync (the SDK reconnects
+            // on its own schedule, so a third connect can land here), and only disposing the
+            // listener reliably faults that. Joined with a bound as belt and braces — see
+            // LoopbackServer.
+            listener.Close();
+            try { await LoopbackServer.JoinAsync(serverTask); } catch { /* cancellation / listener-close expected */ }
         }
     }
 }

@@ -93,12 +93,14 @@ public class FeatureFlagHttpClientTests
             Assert.True(read > 0);
             Assert.Contains("hello", Encoding.UTF8.GetString(buffer, 0, read));
 
-            // Surface any server-side fault on the happy path.
-            await serverTask;
+            // Surface any server-side fault on the happy path. Bounded: this loop serves one
+            // request and returns, so failing to finish is a real defect, not slow teardown.
+            Assert.True(await LoopbackServer.JoinAsync(serverTask),
+                "stub server loop did not finish");
         }
         finally
         {
-            listener.Stop();
+            listener.Close();
         }
     }
 
@@ -154,8 +156,12 @@ public class FeatureFlagHttpClientTests
         finally
         {
             serverDone.Cancel();
-            await serverTask; // expected exceptions are swallowed inside; real faults surface
-            listener.Stop();
+            // Close before joining, not after: if the request never reached the listener the
+            // loop is still parked in GetContextAsync, which cancelling serverDone does not
+            // interrupt. Bounded join for the same reason — see LoopbackServer.
+            listener.Close();
+            // Expected teardown exceptions are swallowed inside the loop; real faults surface.
+            await LoopbackServer.JoinAsync(serverTask);
         }
     }
 }
