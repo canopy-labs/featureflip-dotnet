@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.6.1 — 2026-08-05
+
+### Fixed
+
+- `LICENSE` is now the verbatim Apache-2.0 text. Three phrases in the operative sections had been reworded and the appendix dropped, which left automated license scanners unable to identify it. The license itself is unchanged; the file now says what it always claimed to.
+- The README's License section said MIT. `LICENSE`, the `.csproj` and the NuGet listing have always said Apache-2.0, which is the actual license.
+- The XML documentation on `FlagsChangedEventArgs.ChangedKeys` described a coalescing gap that no longer exists. Change detection compares configuration content, not the second-granular wire `Version`, so two edits inside one second are distinguished; what remains is ordinary snapshot coalescing, which is not time-bounded. The behaviour was already correct — only the remark shipped in IntelliSense was stale.
+
 ## 2.6.0 — 2026-07-29
 
 ### Added

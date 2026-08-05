@@ -140,4 +140,4 @@ mock.Setup(c => c.BoolVariation("my-feature", It.IsAny<EvaluationContext>(), fal
 
 ## License
 
-MIT
+Apache-2.0
