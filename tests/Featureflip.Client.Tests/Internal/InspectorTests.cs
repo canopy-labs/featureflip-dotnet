@@ -365,11 +365,16 @@ public class InspectorTests
 
         client.Dispose();
 
-        // A closed client emits no inspector events, but still returns the same value:
-        // disposal suppresses the notification only, it does not change evaluation.
+        // A disposed client emits no inspector events AND serves the caller's
+        // default (#2309). This previously asserted the opposite — "disposal must
+        // not change the value a caller receives" — which pinned C#'s own
+        // behaviour rather than a cross-SDK contract: Python and PHP have always
+        // degraded to the default here, because the core is shut down and the
+        // store it would read can never update again. The assertion this test
+        // exists for is the event count, which is unchanged.
         var value = client.BoolVariation("my-flag", context, defaultValue: false);
 
-        Assert.True(value, "disposal must not change the value a caller receives");
+        Assert.False(value);
         Assert.Single(events);
     }
 
@@ -465,6 +470,29 @@ public class InspectorTests
                 DateTimeStyles.RoundtripKind,
                 out _),
             $"timestamp '{timestamp}' is not a parseable ISO-8601 value");
+    }
+
+    [Fact]
+    public void Inspector_FiresWithSubstitutedContext_WhenContextIsNull()
+    {
+        // The inspector payload already substitutes an empty context for a null one
+        // (`context?.Copy() ?? new EvaluationContext()`), which is what makes a null
+        // context a supported "no user" evaluation rather than an error. This pins that
+        // behaviour, and doubles as proof that the evaluation itself completes — the
+        // NullReferenceException in #2311 came from the tracking hop that runs after.
+        var events = new List<EvaluationEvent>();
+        var client = CreateClient(new List<FlagConfiguration> { BoolFlag("my-flag", enabled: true, fallthrough: "on") },
+            Inspectors(e => events.Add(e)));
+
+        var value = client.BoolVariation("my-flag", null!, defaultValue: false);
+
+        Assert.True(value);
+        var evt = Assert.Single(events);
+        Assert.Equal("my-flag", evt.FlagKey);
+        Assert.Equal(EvaluationReason.Fallthrough, evt.Reason);
+        Assert.Equal("on", evt.VariationKey);
+        Assert.NotNull(evt.Context);
+        Assert.Null(evt.Context.UserId);
     }
 
     private static IList<EvaluationInspector> Inspectors(params EvaluationInspector[] inspectors)

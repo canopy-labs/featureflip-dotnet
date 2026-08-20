@@ -256,6 +256,65 @@ public class FeatureflipClientTests
         Assert.True(client.IsInitialized);
     }
 
+    // --- Use after dispose (#2309) ---
+    //
+    // Dispose() releases the core, which stops streaming/polling and shuts down
+    // the event processor — but the in-memory store stays readable. Without a
+    // guard the handle keeps serving a frozen snapshot that can never update
+    // again, while still reporting itself initialized. The _disposed flag was
+    // already consulted on the change-listener paths but not on evaluation.
+    // Python and PHP already implement and document the guarded behaviour.
+
+    [Fact]
+    public void DisposedClient_ReturnsCallerDefaultFromEveryAccessor()
+    {
+        var client = CreateTestClient(new List<FlagConfiguration>
+        {
+            CreateBooleanFlag("my-flag", enabled: true, fallthroughVariation: "on")
+        });
+        var context = new EvaluationContext { UserId = "u" };
+
+        // Precondition: the fixture really serves a non-default value while open.
+        Assert.True(client.BoolVariation("my-flag", context, defaultValue: false));
+
+        client.Dispose();
+
+        Assert.False(client.BoolVariation("my-flag", context, defaultValue: false));
+        Assert.Equal("DEF", client.StringVariation("my-flag", context, defaultValue: "DEF"));
+        Assert.Equal(-1, client.IntVariation("my-flag", context, defaultValue: -1));
+        Assert.Equal(-1.0, client.DoubleVariation("my-flag", context, defaultValue: -1.0));
+    }
+
+    [Fact]
+    public void DisposedClient_ReportsNotInitialized()
+    {
+        var client = CreateTestClient(new List<FlagConfiguration>
+        {
+            CreateBooleanFlag("my-flag", enabled: true, fallthroughVariation: "on")
+        });
+        Assert.True(client.IsInitialized);
+
+        client.Dispose();
+
+        Assert.False(client.IsInitialized);
+    }
+
+    [Fact]
+    public void DisposedClient_VariationDetailReturnsTheDefaultWithError()
+    {
+        var client = CreateTestClient(new List<FlagConfiguration>
+        {
+            CreateBooleanFlag("my-flag", enabled: true, fallthroughVariation: "on")
+        });
+        var context = new EvaluationContext { UserId = "u" };
+
+        client.Dispose();
+
+        var detail = client.VariationDetail("my-flag", context, false);
+        Assert.False(detail.Value);
+        Assert.Equal(EvaluationReason.Error, detail.Reason);
+    }
+
     [Fact]
     public void Dispose_CanBeCalledMultipleTimes()
     {
@@ -439,6 +498,68 @@ public class FeatureflipClientTests
 
         await client.WaitForInitializationAsync(cts.Token); // does not throw: init already done
         Assert.True(client.IsInitialized);
+    }
+
+    // ---------------------------------------------------------------------
+    // Null evaluation context (#2311)
+    //
+    // A null context is a legitimate "no user" evaluation. Evaluate<T> already
+    // tolerates it — it is wrapped so nothing escapes, and NotifyInspectors
+    // substitutes an empty context — but the tracking hop runs afterwards, outside
+    // that protection, and dereferenced the context unguarded. Unlike the Java SDK
+    // (#2280), TrackEvaluation is called unconditionally here, so BOTH the
+    // existing-flag and missing-flag paths threw.
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void BoolVariation_NullContext_ExistingFlag_ReturnsEvaluatedValue()
+    {
+        var client = CreateTestClient(new List<FlagConfiguration>
+        {
+            CreateBooleanFlag("my-flag", true, "on")
+        });
+
+        var result = client.BoolVariation("my-flag", null!, false);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void BoolVariation_NullContext_MissingFlag_ReturnsDefault()
+    {
+        var client = CreateTestClient(new List<FlagConfiguration>());
+
+        var result = client.BoolVariation("nonexistent", null!, true);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void StringVariation_NullContext_ReturnsEvaluatedValue()
+    {
+        var client = CreateTestClient(new List<FlagConfiguration>
+        {
+            CreateStringFlag("string-flag", true, "on", "hello-world")
+        });
+
+        var result = client.StringVariation("string-flag", null!, "default");
+
+        Assert.Equal("hello-world", result);
+    }
+
+    [Fact]
+    public void VariationDetail_NullContext_ReportsFallthrough()
+    {
+        var client = CreateTestClient(new List<FlagConfiguration>
+        {
+            CreateBooleanFlag("my-flag", true, "on")
+        });
+
+        var detail = client.VariationDetail("my-flag", null!, false);
+
+        Assert.True(detail.Value);
+        Assert.Equal(EvaluationReason.Fallthrough, detail.Reason);
+        Assert.Equal("on", detail.VariationKey);
     }
 
     private static FeatureflipClient CreateTestClient(List<FlagConfiguration> flags)

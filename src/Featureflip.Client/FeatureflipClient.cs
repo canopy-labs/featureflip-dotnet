@@ -244,7 +244,7 @@ public sealed class FeatureflipClient : IFeatureflipClient
     }
 
     /// <inheritdoc />
-    public bool IsInitialized => _core.IsInitialized;
+    public bool IsInitialized => Volatile.Read(ref _disposed) == 0 && _core.IsInitialized;
 
     /// <inheritdoc />
     public Task WaitForInitializationAsync(CancellationToken cancellationToken = default)
@@ -253,6 +253,14 @@ public sealed class FeatureflipClient : IFeatureflipClient
     /// <inheritdoc />
     public T Variation<T>(string key, EvaluationContext context, T defaultValue)
     {
+        // A disposed handle serves the caller's default (#2309). Dispose releases
+        // the core — stopping streaming/polling and shutting down the event
+        // processor — but the in-memory store stays readable, so without this
+        // guard the handle would keep serving a frozen snapshot that can never
+        // update again. Returning early also suppresses the evaluation event a
+        // disposed client must not emit.
+        if (Volatile.Read(ref _disposed) != 0) return defaultValue;
+
         var detail = _core.Evaluate<T>(key, context, defaultValue);
         _core.TrackEvaluation(key, context, detail);
         return detail.Value;
@@ -261,6 +269,11 @@ public sealed class FeatureflipClient : IFeatureflipClient
     /// <inheritdoc />
     public EvaluationDetail<T> VariationDetail<T>(string key, EvaluationContext context, T defaultValue)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return new EvaluationDetail<T>(defaultValue, EvaluationReason.Error, null, "Client is disposed");
+        }
+
         var detail = _core.Evaluate<T>(key, context, defaultValue);
         _core.TrackEvaluation(key, context, detail);
         return detail;
@@ -287,10 +300,18 @@ public sealed class FeatureflipClient : IFeatureflipClient
         => Variation(key, context, defaultValue);
 
     /// <inheritdoc />
-    public void Flush() => _core.Flush();
+    public void Flush()
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        _core.Flush();
+    }
 
     /// <inheritdoc />
-    public Task FlushAsync(CancellationToken cancellationToken = default) => _core.FlushAsync(cancellationToken);
+    public Task FlushAsync(CancellationToken cancellationToken = default)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return Task.CompletedTask;
+        return _core.FlushAsync(cancellationToken);
+    }
 
     /// <inheritdoc />
     public void Dispose()

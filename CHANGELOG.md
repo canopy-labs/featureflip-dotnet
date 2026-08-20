@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.7.0 — 2026-08-20
+
+### Changed
+
+- A type-mismatched read returns the caller's default and reports `EvaluationReason.Error`, instead of returning it under the evaluator's *success* reason, which left callers no signal at all. Reading a String flag through a number accessor, say, is now detectable rather than silent. Matching reads and the generic/JSON accessors are unchanged. ([#2281](https://github.com/canopy-labs/featureflip/issues/2281))
+### Fixed
+
+- A closed handle serves the caller's default from every accessor and reports not-initialized. `Dispose()` releases the shared core — stopping streaming and polling, shutting down the event processor — but the in-memory store stayed readable, so a closed client kept evaluating against a frozen snapshot that could never update again while still reporting itself initialized. ([#2309](https://github.com/canopy-labs/featureflip/issues/2309))
+
+- A null `EvaluationContext` no longer throws an unguarded `NullReferenceException` out of an evaluation that had already succeeded. `Evaluate<T>` tolerates a null context — it is wrapped so nothing escapes, and the inspector payload substitutes an empty context — but `TrackEvaluation` runs after it, outside that protection, and dereferenced the context. Because tracking is called unconditionally, *every* `Variation`/`VariationDetail` call with a null context threw, missing flags included. A null context is now an anonymous evaluation: the event is still recorded, with the user id left null. ([#2311](https://github.com/canopy-labs/featureflip/issues/2311))
+
 ## 2.6.1 — 2026-08-05
 
 ### Fixed

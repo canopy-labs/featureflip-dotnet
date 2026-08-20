@@ -327,7 +327,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
                     result.PrerequisiteKey);
             }
 
-            var value = DeserializeValue(variation.Value, defaultValue);
+            var value = DeserializeValue<T>(variation.Value);
 
             NotifyInspectors(
                 key,
@@ -530,6 +530,23 @@ internal sealed class SharedFeatureflipCore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Queues an evaluation event for the analytics batch.
+    /// </summary>
+    /// <remarks>
+    /// The context is optional. A null one is a legitimate "no user" evaluation —
+    /// <see cref="Evaluate{T}"/> serves the fallthrough for it and NotifyInspectors
+    /// substitutes an empty context — so it must not be able to fail a flag read here.
+    /// This runs <em>after</em> Evaluate has computed the caller's answer and outside
+    /// the try/catch that turns evaluation failures into the caller's default, so
+    /// dereferencing a null context threw a bare NullReferenceException out of a call
+    /// that had already succeeded (#2311). Callers bypass nullable reference
+    /// annotations at runtime — the same reason NormalizeInspectors drops null
+    /// entries rather than throwing. The event is still recorded, just unattributed:
+    /// SdkEvent.UserId is nullable, as is the eval-api's SdkEventDto.UserId. That
+    /// matches the Java SDK (#2280) and the Go SDK, whose value-typed context yields
+    /// an empty user id for the same case.
+    /// </remarks>
     public void TrackEvaluation<T>(string key, EvaluationContext context, EvaluationDetail<T> detail)
     {
         if (IsShutDown) return;
@@ -538,7 +555,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
         {
             Type = "Evaluation",
             FlagKey = key,
-            UserId = context.UserId,
+            UserId = context?.UserId,
             Variation = detail.VariationKey,
             Timestamp = DateTime.UtcNow
         };
@@ -594,31 +611,39 @@ internal sealed class SharedFeatureflipCore : IDisposable
         }
     }
 
-    private static T DeserializeValue<T>(JsonElement element, T defaultValue)
+    /// <summary>
+    /// Converts a served variation value to the type the caller asked for, strictly.
+    /// </summary>
+    /// <remarks>
+    /// The <see cref="JsonElement"/> accessors already throw on a type mismatch, which is
+    /// what makes the caller's default the returned value. This method deliberately does
+    /// NOT swallow that throw: letting it reach <see cref="Evaluate{T}"/>'s handler is
+    /// what turns a mismatched read into <see cref="EvaluationReason.Error"/> instead of
+    /// the evaluator's success reason, so callers can actually detect it (#2281).
+    /// Swallowing it here returned the right value with a reason that said everything
+    /// was fine.
+    /// </remarks>
+    private static T DeserializeValue<T>(JsonElement element)
     {
-        try
+        if (typeof(T) == typeof(bool))
+            return (T)(object)element.GetBoolean();
+        if (typeof(T) == typeof(string))
         {
-            if (typeof(T) == typeof(bool))
-                return (T)(object)element.GetBoolean();
-            if (typeof(T) == typeof(string))
-            {
-                var strValue = element.GetString();
-                return strValue != null ? (T)(object)strValue : defaultValue;
-            }
-            if (typeof(T) == typeof(int))
-                return (T)(object)element.GetInt32();
-            if (typeof(T) == typeof(double))
-                return (T)(object)element.GetDouble();
+            var strValue = element.GetString()
+                ?? throw new InvalidOperationException("Value is JSON null, not a string.");
+            return (T)(object)strValue;
+        }
+        if (typeof(T) == typeof(int))
+            return (T)(object)element.GetInt32();
+        if (typeof(T) == typeof(double))
+            return (T)(object)element.GetDouble();
 #if NETSTANDARD2_0
-            return JsonSerializer.Deserialize<T>(element.GetRawText(), JsonOptions) ?? defaultValue;
+        return JsonSerializer.Deserialize<T>(element.GetRawText(), JsonOptions)
+            ?? throw new InvalidOperationException($"Value is not convertible to {typeof(T).Name}.");
 #else
-            return element.Deserialize<T>(JsonOptions) ?? defaultValue;
+        return element.Deserialize<T>(JsonOptions)
+            ?? throw new InvalidOperationException($"Value is not convertible to {typeof(T).Name}.");
 #endif
-        }
-        catch
-        {
-            return defaultValue;
-        }
     }
 
     private void InitializeSync()
