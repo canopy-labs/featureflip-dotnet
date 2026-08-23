@@ -826,6 +826,40 @@ public class FlagEvaluatorConditionTests
         Assert.Equal(EvaluationReason.RuleMatch, resultUK.Reason);
     }
 
+    // Issue #2262: an operator this SDK does not recognise means "I cannot
+    // evaluate this", NOT "this did not match". Inverting that inability with
+    // Negate would turn it into a match-everyone, serving the flag to 100% of
+    // traffic. Unrecognised operators fail CLOSED, before Negate is applied.
+    //
+    // Every ConditionOperator member is covered by EvaluateOperator, and
+    // FeatureFlagHttpClient's JsonStringEnumConverter rejects an unknown
+    // operator string before it could reach the evaluator — so an out-of-range
+    // cast is the only way to construct one. The invariant is still worth
+    // holding: it guards a member being added without a matching case arm, and
+    // matches the string-typed SDKs (js/go/ruby/php) where the same input IS
+    // reachable over the wire.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Condition_UnrecognisedOperator_FailsClosedRegardlessOfNegate(bool negate)
+    {
+        // Arrange
+        var flag = CreateFlagWithCondition(
+            attribute: "country",
+            op: (ConditionOperator)999,
+            values: new List<string> { "US" },
+            negate: negate
+        );
+        var context = new EvaluationContext { UserId = "user1", Country = "US" };
+
+        // Act
+        var result = _evaluator.Evaluate(flag, context);
+
+        // Assert - the rule must not match, so evaluation falls through
+        Assert.Equal("off", result.VariationKey);
+        Assert.Equal(EvaluationReason.Fallthrough, result.Reason);
+    }
+
     [Fact]
     public void Condition_MissingAttribute_ReturnsFalse()
     {

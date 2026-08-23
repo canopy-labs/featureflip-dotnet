@@ -242,9 +242,22 @@ internal sealed class FlagEvaluator
 
         var stringValue = ConvertToString(attributeValue);
 
-        bool result = EvaluateOperator(condition.Operator, stringValue, condition.Values);
+        bool? result = EvaluateOperator(condition.Operator, stringValue, condition.Values);
 
-        return condition.Negate ? !result : result;
+        // Issue #2262: an unrecognised operator fails CLOSED. Inverting it with
+        // Negate would turn "I cannot evaluate this" into "matches every user",
+        // serving the flag to 100% of traffic. Every ConditionOperator member is
+        // covered by EvaluateOperator, and FeatureFlagHttpClient's
+        // JsonStringEnumConverter rejects an unknown operator before it reaches
+        // here, so this is defensive — it holds the invariant if a member is
+        // added without a matching case, and keeps this SDK's contract identical
+        // to the string-typed SDKs (js/go/ruby/php) where the input IS reachable.
+        if (result is null)
+        {
+            return false;
+        }
+
+        return condition.Negate ? !result.Value : result.Value;
     }
 
     /// <summary>
@@ -289,7 +302,13 @@ internal sealed class FlagEvaluator
         };
     }
 
-    private bool EvaluateOperator(ConditionOperator op, string value, List<string> conditionValues)
+    /// <summary>
+    /// Applies a single operator to <paramref name="value"/>. Returns <c>null</c> — not
+    /// <c>false</c> — for an operator this SDK does not recognise, so callers can tell
+    /// "cannot evaluate" apart from "evaluated, did not match"; only the latter may be
+    /// inverted by <c>Negate</c> (#2262).
+    /// </summary>
+    private bool? EvaluateOperator(ConditionOperator op, string value, List<string> conditionValues)
     {
         switch (op)
         {
@@ -378,7 +397,8 @@ internal sealed class FlagEvaluator
                 return CompareSemver(value, conditionValues, c => c <= 0);
 
             default:
-                return false;
+                // Unrecognised operator — "cannot evaluate", not "did not match".
+                return null;
         }
     }
 

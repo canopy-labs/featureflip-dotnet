@@ -13,11 +13,33 @@ internal sealed class SseStreamReader : IDisposable
 {
     // Deserializer for the `sync` snapshot payload — same shape/options as the
     // GET /v1/sdk/flags response (camelCase properties, string enums).
-    private static readonly JsonSerializerOptions SnapshotJsonOptions = new()
+    // internal (not private) so tests can assert against the SHIPPED configuration rather
+    // than a replica, which would keep passing if this registration regressed.
+    internal static readonly JsonSerializerOptions SnapshotJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter(namingPolicy: null) }
+        // TolerantConditionOperatorConverter FIRST: System.Text.Json picks the first
+        // converter that handles a type, so it must precede the stock enum converter to
+        // win for ConditionOperator. It maps an unknown operator to a sentinel instead of
+        // throwing, which previously failed the WHOLE flags payload over one condition (#2372).
+        //
+        // allowIntegerValues: false is the OTHER axis, and the two must not be confused.
+        // Left at its TRUE default, an integer resolved to a member by its UNDERLYING
+        // VALUE — ordinal, for these declarations — so a value inserted mid-enum
+        // server-side would silently shift every later value here to the wrong one: no
+        // exception, no log, wrong targeting. Java closed the identical hazard with
+        // FAIL_ON_NUMBERS_FOR_ENUMS (#2283); C# was the mirror-image case (#2315). #2279
+        // is the server bug that made integer enums reach SDKs at all.
+        //
+        // So: an unknown enum STRING is tolerated (forward compatibility, #2372); an
+        // integer is a TYPE violation and is rejected.
+        Converters =
+        {
+            new TolerantConditionOperatorConverter(),
+            new TolerantFlagTypeConverter(),
+            new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false)
+        }
     };
 
     private readonly Stream _stream;

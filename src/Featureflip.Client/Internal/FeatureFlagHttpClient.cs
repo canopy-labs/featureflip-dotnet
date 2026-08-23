@@ -10,6 +10,14 @@ internal sealed class FeatureFlagHttpClient : IDisposable
     private readonly HttpClient _httpClient;
     private readonly HttpClient _streamingClient;
     private readonly JsonSerializerOptions _jsonOptions;
+
+    /// <summary>
+    /// The SHIPPED deserializer options, exposed so tests can assert against the real
+    /// configuration rather than a replica — a test-local copy would keep passing if this
+    /// configuration regressed, which is precisely how a converter registration silently
+    /// goes missing.
+    /// </summary>
+    internal JsonSerializerOptions JsonOptions => _jsonOptions;
     private bool _disposed;
 
     public FeatureFlagHttpClient(string sdkKey, FeatureFlagOptions options)
@@ -37,7 +45,20 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         _jsonOptions = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            Converters = { new JsonStringEnumConverter(namingPolicy: null) }
+            // TolerantConditionOperatorConverter FIRST: System.Text.Json picks the first
+            // converter that handles a type, so it must precede the stock enum converter to
+            // win for ConditionOperator. It maps an unknown operator to a sentinel instead of
+            // throwing, which previously failed the WHOLE flags payload over one condition (#2372).
+            //
+            // allowIntegerValues: false rejects an integer enum, a TYPE violation — see
+            // SseStreamReader.SnapshotJsonOptions for why that default is a silent-wrong
+            // hazard, and why it is a different axis from #2372's string tolerance (#2315).
+            Converters =
+            {
+                new TolerantConditionOperatorConverter(),
+                new TolerantFlagTypeConverter(),
+                new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false)
+            }
         };
     }
 

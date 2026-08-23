@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.7.1 — 2026-08-23
+
+### Fixed
+
+- An unrecognised `FlagType` no longer fails the entire config fetch. One unknown value in one flag discarded the whole payload, so a single new server-side type could blank out every flag the SDK served. ([#2401](https://github.com/canopy-labs/featureflip/issues/2401))
+- An unrecognised condition operator now fails closed instead of matching every user. The default arm returned `false`, which a negated condition then inverted to `true` — so a config naming an operator the SDK did not know could silently target everyone. ([#2262](https://github.com/canopy-labs/featureflip/issues/2262))
+- An unrecognised condition operator is tolerated at deserialization instead of discarding the whole config, matching the string-typed SDKs. ([#2372](https://github.com/canopy-labs/featureflip/issues/2372))
+- Integer values are rejected where an enum is expected, instead of being coerced into a variant the wire format never named. ([#2315](https://github.com/canopy-labs/featureflip/issues/2315))
+
 ## 2.7.0 — 2026-08-20
 
 ### Changed
