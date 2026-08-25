@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.8.1 — 2026-08-24
+
+### Fixed
+
+- A date operand is now trimmed of exactly the whitespace the evaluation engine trims (tab, newline, vertical tab, form feed, carriage return and space), and is rejected outright if it still carries a NUL, another control character, or a non-ASCII whitespace character. Each SDK had been relying on its own language's `trim`, and no two of those cover the same set, so the same operand could match on one SDK and match nothing on another. ([#2468](https://github.com/canopy-labs/featureflip/issues/2468))
+
+## 2.8.0 — 2026-08-24
+
+### Fixed
+
+- Analytics events now survive a transient failure of the events endpoint. The queue is drained before the batch is sent, so until now any non-2xx or network error discarded that batch outright — the public edge answers this endpoint with a 503 at a low but constant rate, so evaluation analytics were being lost steadily. A retryable failure (5xx, 429, transport fault, timeout) returns the batch to the front of the queue for the next flush; a permanent one (401/403/400) still drops it, because retrying a rejected SDK key forever would starve every later event. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+
+### Changed
+
+- The event queue is now bounded at 10,000 events. It is only reachable during a sustained outage of the events endpoint, where the oldest events are shed first so memory stays bounded and the freshest analytics are kept.
+- A flush sends one request per batch instead of one for the whole queue. Re-queuing is what lets the queue reach its bound during an outage, and posting a backlog of that size in a single request risks a body the server rejects with a 413 — which is non-retryable, so the path meant to preserve the backlog would be the one that discarded it.
+- A batch-size-triggered flush now backs off while the endpoint is failing. A re-queued batch leaves the queue at or above the batch size, so the size trigger would otherwise fire on every recorded event and turn a failing endpoint into one request per evaluation. The periodic flush is the retry vehicle instead.
+
 ## 2.7.1 — 2026-08-23
 
 ### Fixed

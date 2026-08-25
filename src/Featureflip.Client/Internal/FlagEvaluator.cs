@@ -481,6 +481,38 @@ internal sealed class FlagEvaluator
     }
 
     /// <summary>
+    /// The ONLY characters trimmed from a date operand, and the whole of the operand's
+    /// permitted whitespace: U+0009..U+000D plus U+0020 — exactly the class
+    /// <c>NumberStyles.Integer</c> accepts via <c>AllowLeadingWhite | AllowTrailingWhite</c>.
+    /// </summary>
+    private static readonly char[] DateOperandWhitespace = ['\t', '\n', '\v', '\f', '\r', ' '];
+
+    /// <summary>
+    /// True when <paramref name="s"/> carries a character no date operand may contain: a NUL or
+    /// other control character, a non-ASCII whitespace character, or a zero-width no-break space.
+    /// An interior ASCII space is allowed — it is the ISO-8601 date/time separator.
+    /// <para>
+    /// Mirrors the engine's guard of the same name. Without it the two parse branches below
+    /// disagree with each other — <c>long.TryParse</c> silently accepts a TRAILING NUL as a
+    /// string terminator while <c>DateTimeOffset.TryParse</c> accepts a leading U+00A0 the
+    /// number branch rejects — and neither accident is expressible in a hand-rolled SDK parser
+    /// without special-casing it (#2468).
+    /// </para>
+    /// </summary>
+    private static bool HasForbiddenOperandChar(string s)
+    {
+        foreach (var c in s)
+        {
+            if (char.IsControl(c) || c == '\uFEFF' || (c != ' ' && char.IsWhiteSpace(c)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Parses <paramref name="value"/> into a UTC-normalized <see cref="DateTimeOffset"/>. Accepts
     /// ISO-8601 timestamps (offset-bearing or offset-less, with offset-less assumed UTC) and a
     /// fallback of unix seconds since the epoch. Returns false when the value is neither — mirroring
@@ -488,16 +520,27 @@ internal sealed class FlagEvaluator
     /// </summary>
     private static bool TryParseDateTime(string value, out DateTimeOffset result)
     {
+        result = default;
+
+        // Normalize at the front door so both branches below see the same string, and so the
+        // accepted whitespace class is this method's own stated contract rather than whatever
+        // each branch's parser happens to tolerate (#2468).
+        var s = value.Trim(DateOperandWhitespace);
+        if (s.Length == 0 || HasForbiddenOperandChar(s))
+        {
+            return false;
+        }
+
         // Use InvariantCulture for consistent date parsing across locales. AssumeUniversal treats
         // offset-less input as UTC; AdjustToUniversal normalizes offset-bearing input to UTC.
-        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture,
+        if (DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out result))
         {
             return true;
         }
 
         // Try unix timestamp (seconds since epoch)
-        if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unixSeconds))
+        if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unixSeconds))
         {
             try
             {

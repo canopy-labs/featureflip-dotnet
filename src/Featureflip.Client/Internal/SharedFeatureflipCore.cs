@@ -60,6 +60,28 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
     private int _refCount;
     private int _isShutDown;
+
+    /// <summary>
+    /// UTC ticks before which the batch-size trigger must not start another flush.
+    /// </summary>
+    /// <remarks>
+    /// A re-queued batch leaves the queue at or above <c>FlushBatchSize</c>, so without
+    /// this gate every subsequent <see cref="TrackEvaluation{T}"/> would start another
+    /// flush — turning a failing endpoint into one request per evaluation, which is worse
+    /// for the server than the dropping it replaced. The periodic flush loop is the retry
+    /// vehicle; this only suppresses the size trigger between its ticks.
+    /// </remarks>
+    private long _nextAutoFlushTicks;
+
+    /// <summary>
+    /// 1 while a batch-size-triggered flush is in flight, 0 otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The backoff gate alone is not enough: it is only armed once a flush has FAILED, and
+    /// the trigger fires again long before the first HTTP round-trip returns. Without this
+    /// every evaluation in a tight loop starts its own concurrent flush.
+    /// </remarks>
+    private int _autoFlushInFlight;
     private volatile bool _isInitialized;
 
     private System.Collections.Concurrent.ConcurrentDictionary<string, SharedFeatureflipCore>? _owningMap;
@@ -92,7 +114,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
         _storeSubscription = _store.OnChange(NotifyFlagsChanged);
         _evaluator = new FlagEvaluator();
         _eventProcessor = new EventProcessor(_options.FlushInterval, _options.FlushBatchSize);
-        _httpClient = new FeatureFlagHttpClient(sdkKey, _options);
+        _httpClient = new FeatureFlagHttpClient(sdkKey, _options, _logger);
         _cts = new CancellationTokenSource();
         _initializationTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _refCount = 1;
@@ -562,10 +584,34 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
         _eventProcessor.Enqueue(evt);
 
-        // Check if we should flush based on batch size.
-        if (_eventProcessor.ShouldFlush())
+        // Flush on batch size, unless a retryable failure has put the size trigger in
+        // backoff or an earlier size-triggered flush is still in flight.
+        if (_eventProcessor.ShouldFlush()
+            && DateTime.UtcNow.Ticks >= Interlocked.Read(ref _nextAutoFlushTicks)
+            && Interlocked.CompareExchange(ref _autoFlushInFlight, 1, 0) == 0)
         {
-            _ = FlushAsync();
+            _ = AutoFlushAsync();
+        }
+    }
+
+    /// <summary>
+    /// Runs a batch-size-triggered flush and releases the in-flight latch afterwards.
+    /// </summary>
+    private async Task AutoFlushAsync()
+    {
+        try
+        {
+            await FlushAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // FlushAsync already classified and logged this; there is no caller to observe
+            // a throw on the fire-and-forget path, and letting it escape would surface as
+            // an unobserved task exception.
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _autoFlushInFlight, 0);
         }
     }
 
@@ -592,24 +638,77 @@ internal sealed class SharedFeatureflipCore : IDisposable
     {
         if (IsShutDown) return;
 
-        try
+        if (_httpClient == null) return;
+
+        // One request per batch rather than one for the whole queue. Re-queuing failures
+        // (#2456) is what lets the queue grow to its bound during an outage, and posting
+        // 10,000 events at once risks a body the server rejects outright — a 413 is
+        // non-retryable, so the backlog would be dropped by the very path meant to keep it.
+        while (true)
         {
-            var events = _eventProcessor.Drain();
-            if (events.Count > 0 && _httpClient != null)
+            // Drained BEFORE the send, so the batch has to be held here to be put back if
+            // the send fails. Without that a single transient failure discarded it, and the
+            // production edge answers this endpoint with a 503 at a low constant rate — so
+            // evaluation analytics were being lost steadily.
+            var events = _eventProcessor.DrainBatch(_options.FlushBatchSize);
+            if (events.Count == 0) return;
+
+            try
             {
                 await _httpClient.SendEventsAsync(events, cancellationToken).ConfigureAwait(false);
+                Interlocked.Exchange(ref _nextAutoFlushTicks, 0);
                 _logger.LogDebug("Flushed {EventCount} events", events.Count);
             }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to flush events");
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The caller cancelled the flush; the server never rejected this batch. Keep
+                // it so a later flush can still deliver it, then let cancellation propagate.
+                _eventProcessor.Requeue(events);
+                throw;
+            }
+            catch (Exception ex) when (IsRetryableFlushFailure(ex))
+            {
+                var dropped = _eventProcessor.Requeue(events);
+                Interlocked.Exchange(ref _nextAutoFlushTicks, DateTime.UtcNow.Add(_options.FlushInterval).Ticks);
+                _logger.LogWarning(ex,
+                    "Failed to flush {EventCount} events; re-queued for the next flush ({DroppedCount} dropped to stay within the queue bound)",
+                    events.Count, dropped);
+                // Stop here. The batch is back at the head of the queue this loop is
+                // draining, so continuing would re-send it immediately and spin for as long
+                // as the endpoint stays down.
+                return;
+            }
+            catch (Exception ex)
+            {
+                // Dropped, so the queue shrinks and the loop still terminates — move on to
+                // the next batch rather than letting one poison batch block the backlog.
+                _logger.LogWarning(ex,
+                    "Failed to flush {EventCount} events; dropped because the failure is not retryable",
+                    events.Count);
+            }
         }
     }
+
+    /// <summary>
+    /// Whether a failed flush could plausibly succeed if the same batch were sent again.
+    /// </summary>
+    /// <remarks>
+    /// Transport faults (connection reset, DNS, TLS) and request timeouts are transient by
+    /// nature. For an HTTP answer the status decides: 5xx and 429 are retryable; anything
+    /// else — 401/403 means the SDK key was rejected, 400 means the body is malformed —
+    /// will fail identically next time, and retrying it forever would pin the queue at its
+    /// bound and starve every later event.
+    /// </remarks>
+    private static bool IsRetryableFlushFailure(Exception ex) => ex switch
+    {
+        EventSendException send => send.IsRetryable,
+        // Reaching here means no cancellation was requested by the caller (that case is
+        // handled by the catch above), so this is the HttpClient.Timeout elapsing.
+        OperationCanceledException => true,
+        HttpRequestException => true,
+        TimeoutException => true,
+        _ => false
+    };
 
     /// <summary>
     /// Converts a served variation value to the type the caller asked for, strictly.

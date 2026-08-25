@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using Featureflip.Client.Internal;
 using Featureflip.Client.Internal.Models;
@@ -194,6 +195,78 @@ public class EventProcessorTests
         Assert.Equal(timestamp, result.Timestamp);
         Assert.NotNull(result.Metadata);
         Assert.True(result.Metadata.ContainsKey("custom"));
+    }
+
+    [Fact]
+    public void EventProcessor_Requeue_ReturnsEventsToTheFrontOfTheQueue()
+    {
+        // Arrange — a batch that failed to send, plus an event recorded while it was in flight.
+        var processor = new EventProcessor(TimeSpan.FromMinutes(10), 100);
+        var failedBatch = new List<SdkEvent> { CreateEvent("flag-1"), CreateEvent("flag-2") };
+        processor.Enqueue(CreateEvent("flag-3"));
+
+        // Act
+        var dropped = processor.Requeue(failedBatch);
+        var events = processor.Drain();
+
+        // Assert — the retried batch leads, so rough chronological order survives.
+        Assert.Equal(0, dropped);
+        Assert.Equal(new[] { "flag-1", "flag-2", "flag-3" }, events.Select(e => e.FlagKey));
+    }
+
+    [Fact]
+    public void EventProcessor_Requeue_EmptyBatch_IsANoOp()
+    {
+        var processor = new EventProcessor(TimeSpan.FromMinutes(10), 100);
+
+        Assert.Equal(0, processor.Requeue(Array.Empty<SdkEvent>()));
+        Assert.Empty(processor.Drain());
+    }
+
+    [Fact]
+    public void EventProcessor_Enqueue_BeyondMaxQueueSize_ShedsOldestEvents()
+    {
+        // Arrange
+        var processor = new EventProcessor(TimeSpan.FromMinutes(10), batchSize: 100, maxQueueSize: 3);
+
+        // Act
+        for (var i = 0; i < 5; i++)
+            processor.Enqueue(CreateEvent($"flag-{i}"));
+
+        var events = processor.Drain();
+
+        // Assert — the bound holds and it is the oldest events that go.
+        Assert.Equal(new[] { "flag-2", "flag-3", "flag-4" }, events.Select(e => e.FlagKey));
+    }
+
+    [Fact]
+    public void EventProcessor_Requeue_BeyondMaxQueueSize_ShedsOldestAndReportsTheCount()
+    {
+        // Arrange — queue already full of newer events, then a stale batch comes back.
+        var processor = new EventProcessor(TimeSpan.FromMinutes(10), batchSize: 100, maxQueueSize: 3);
+        processor.Enqueue(CreateEvent("new-1"));
+        processor.Enqueue(CreateEvent("new-2"));
+        processor.Enqueue(CreateEvent("new-3"));
+
+        // Act
+        var dropped = processor.Requeue(new List<SdkEvent> { CreateEvent("old-1"), CreateEvent("old-2") });
+        var events = processor.Drain();
+
+        // Assert — a sustained outage sheds the stale re-queued batch rather than starving
+        // new events, and the caller is told how many were lost.
+        Assert.Equal(2, dropped);
+        Assert.Equal(new[] { "new-1", "new-2", "new-3" }, events.Select(e => e.FlagKey));
+    }
+
+    [Fact]
+    public void EventProcessor_Requeue_AfterDispose_ReportsTheWholeBatchAsDropped()
+    {
+        // Nothing will flush again after disposal, so the batch must not be buffered.
+        var processor = new EventProcessor(TimeSpan.FromMinutes(10), 100);
+        processor.Dispose();
+
+        Assert.Equal(2, processor.Requeue(new List<SdkEvent> { CreateEvent("a"), CreateEvent("b") }));
+        Assert.Empty(processor.Drain());
     }
 
     private static SdkEvent CreateEvent(string flagKey)

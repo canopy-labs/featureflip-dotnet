@@ -79,7 +79,12 @@ public class GoldenMalformedTests
         {
             var parsed = JsonSerializer.Deserialize<GetFlagsResponse>(
                 v.GetProperty("payload").GetRawText(), options);
-            store.Replace(parsed!.Flags, parsed.Segments);
+            // Mirrors FeatureFlagHttpClient.GetFlagsAsync: deserialize, then drop the
+            // entities carrying an enum this build cannot evaluate (#2402). A runner that
+            // skipped this step would pass every dropEntity vector by storing the very flag
+            // it is supposed to drop.
+            parsed = UnevaluableEntities.DropUnevaluable(parsed!);
+            store.Replace(parsed.Flags, parsed.Segments);
             applied = true;
         }
         catch (JsonException)
@@ -99,10 +104,31 @@ public class GoldenMalformedTests
                 Assert.True(applied, $"{label}: forward-compatible payload was rejected");
                 Assert.True(store.TryGetFlag("mc-accepted-flag", out _), $"{label}: did not apply");
                 break;
+            case "dropEntity":
+                // Neither accept nor reject: the payload APPLIES, minus the entities
+                // carrying an enum this build cannot evaluate. Both halves are asserted —
+                // "dropped" alone is satisfied by rejecting the whole payload, and "kept"
+                // alone by tolerating the bad value.
+                Assert.True(applied, $"{label}: payload was rejected wholesale");
+                foreach (var key in Keys(v, "dropFlags"))
+                    Assert.False(store.TryGetFlag(key, out _), $"{label}: flag {key} should have been dropped");
+                foreach (var key in Keys(v, "dropSegments"))
+                    Assert.False(store.TryGetSegment(key, out _), $"{label}: segment {key} should have been dropped");
+                foreach (var key in Keys(v, "keepFlags"))
+                    Assert.True(store.TryGetFlag(key, out _), $"{label}: flag {key} should have been kept");
+                foreach (var key in Keys(v, "keepSegments"))
+                    Assert.True(store.TryGetSegment(key, out _), $"{label}: segment {key} should have been kept");
+                break;
             default:
                 throw new XunitException($"unmapped expect for {id}");
         }
     }
+
+    /// <summary>The named string array on a vector, or empty when it does not carry one.</summary>
+    private static IEnumerable<string> Keys(JsonElement vector, string field) =>
+        vector.TryGetProperty(field, out var arr)
+            ? arr.EnumerateArray().Select(k => k.GetString()!)
+            : Enumerable.Empty<string>();
 
     [Fact]
     public void EveryVectorIsExercised()

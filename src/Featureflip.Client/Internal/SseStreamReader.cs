@@ -38,6 +38,8 @@ internal sealed class SseStreamReader : IDisposable
         {
             new TolerantConditionOperatorConverter(),
             new TolerantFlagTypeConverter(),
+            new TolerantServeTypeConverter(),
+            new TolerantConditionLogicConverter(),
             new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false)
         }
     };
@@ -158,12 +160,19 @@ internal sealed class SseStreamReader : IDisposable
         return new SseEvent { Type = type, FlagKey = key, Version = version };
     }
 
-    private static SseEvent ParseSyncEvent(string data)
+    private SseEvent ParseSyncEvent(string data)
     {
         // Full config snapshot the server sends on (re)connect. Carried whole so
         // the core can apply it as a store REPLACE (drop flags absent from it),
         // re-syncing anything changed/deleted during a disconnect.
         var snapshot = JsonSerializer.Deserialize<GetFlagsResponse>(data, SnapshotJsonOptions);
+        // The sync frame is parsed here rather than through GetFlagsAsync, so the
+        // entity-drop has to be applied explicitly — letting the two transports diverge on
+        // the same payload shape is its own bug class (#2279).
+        if (snapshot != null)
+        {
+            snapshot = UnevaluableEntities.DropUnevaluable(snapshot, _logger);
+        }
         return new SseEvent { Type = SseEventType.Sync, Snapshot = snapshot };
     }
 

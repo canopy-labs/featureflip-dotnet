@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Featureflip.Client.Internal.Models;
+using Microsoft.Extensions.Logging;
 
 namespace Featureflip.Client.Internal;
 
@@ -12,6 +13,13 @@ internal sealed class FeatureFlagHttpClient : IDisposable
     private readonly JsonSerializerOptions _jsonOptions;
 
     /// <summary>
+    /// Optional so the many tests that construct this client directly need not supply one.
+    /// The core passes its own, which is what makes an entity dropped for an unevaluable
+    /// enum (#2402) visible rather than silent.
+    /// </summary>
+    private readonly ILogger? _logger;
+
+    /// <summary>
     /// The SHIPPED deserializer options, exposed so tests can assert against the real
     /// configuration rather than a replica — a test-local copy would keep passing if this
     /// configuration regressed, which is precisely how a converter registration silently
@@ -20,8 +28,9 @@ internal sealed class FeatureFlagHttpClient : IDisposable
     internal JsonSerializerOptions JsonOptions => _jsonOptions;
     private bool _disposed;
 
-    public FeatureFlagHttpClient(string sdkKey, FeatureFlagOptions options)
+    public FeatureFlagHttpClient(string sdkKey, FeatureFlagOptions options, ILogger? logger = null)
     {
+        _logger = logger;
         var baseAddress = new Uri(options.BaseUrl.TrimEnd('/') + "/");
 
         // One-shot GET/POST client. HttpClient.Timeout is a *total* request timeout, which
@@ -57,6 +66,8 @@ internal sealed class FeatureFlagHttpClient : IDisposable
             {
                 new TolerantConditionOperatorConverter(),
                 new TolerantFlagTypeConverter(),
+                new TolerantServeTypeConverter(),
+                new TolerantConditionLogicConverter(),
                 new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false)
             }
         };
@@ -95,14 +106,36 @@ internal sealed class FeatureFlagHttpClient : IDisposable
     {
         var response = await _httpClient.GetAsync("v1/sdk/flags", ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<GetFlagsResponse>(_jsonOptions, ct).ConfigureAwait(false);
+        var parsed = await response.Content
+            .ReadFromJsonAsync<GetFlagsResponse>(_jsonOptions, ct).ConfigureAwait(false);
+        // Applied here rather than at each store.Replace call site, so polling and the SSE
+        // segment.updated refetch cannot drift; the sync frame parses its own payload and
+        // drops there (#2402).
+        return parsed == null ? null : UnevaluableEntities.DropUnevaluable(parsed, _logger);
     }
 
     public async Task<FlagConfiguration?> GetFlagAsync(string key, CancellationToken ct = default)
     {
         var response = await _httpClient.GetAsync($"v1/sdk/flags/{Uri.EscapeDataString(key)}", ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<FlagConfiguration>(_jsonOptions, ct).ConfigureAwait(false);
+        var flag = await response.Content
+            .ReadFromJsonAsync<FlagConfiguration>(_jsonOptions, ct).ConfigureAwait(false);
+        if (flag == null) return null;
+
+        // An unevaluable enum drops the flag rather than upserting it (#2402). For a delta
+        // whose whole scope is one flag that means leaving the store's previous copy alone:
+        // replacing it with one this build would mis-evaluate is the outcome the drop
+        // exists to prevent, and the caller's existing null check already skips the upsert.
+        var reason = UnevaluableEntities.FlagReason(flag);
+        if (reason != null)
+        {
+            _logger?.LogWarning(
+                "Dropping flag delta for {FlagKey}: {Reason}. This SDK version may be older "
+                + "than the flag configuration.", key, reason);
+            return null;
+        }
+
+        return flag;
     }
 
     public async Task SendEventsAsync(IReadOnlyList<SdkEvent> events, CancellationToken ct = default)
@@ -110,7 +143,11 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         if (events.Count == 0) return;
         var request = new SendEventsRequest { Events = events };
         var response = await _httpClient.PostAsJsonAsync("v1/sdk/events", request, _jsonOptions, ct).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        // Not EnsureSuccessStatusCode: the flush path has to know WHICH status came back so
+        // it can keep the batch on a retryable failure instead of discarding it (#2456), and
+        // HttpRequestException.StatusCode is unavailable on netstandard2.0.
+        if (!response.IsSuccessStatusCode)
+            throw new EventSendException((int)response.StatusCode);
     }
 
     public async Task<Stream> GetStreamAsync(CancellationToken ct = default)
