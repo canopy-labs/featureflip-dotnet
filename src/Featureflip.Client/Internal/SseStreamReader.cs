@@ -82,7 +82,12 @@ internal sealed class SseStreamReader : IDisposable
             }
             catch (IOException ex)
             {
-                _logger.LogWarning(ex, "SSE stream read error");
+                // Debug, not Warning: a long-lived stream severed mid-frame is routine
+                // behind a CDN or proxy (#2457) — the core reconnects and the server
+                // replays a full `sync` snapshot, so no config is missed and nothing is
+                // degraded. The reader cannot tell a routine sever from a stream that
+                // never works; the core can, and warns for that case.
+                _logger.LogDebug(ex, "SSE stream read error");
                 yield break;
             }
 

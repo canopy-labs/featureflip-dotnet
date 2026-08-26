@@ -82,6 +82,24 @@ internal sealed class SharedFeatureflipCore : IDisposable
     /// every evaluation in a tight loop starts its own concurrent flush.
     /// </remarks>
     private int _autoFlushInFlight;
+
+    /// <summary>
+    /// Completes when the drain loop currently running finishes; null when none is.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="_autoFlushInFlight"/> above only ever guarded the SIZE trigger.
+    /// Nothing stopped the periodic flush loop, an explicit <see cref="FlushAsync"/>
+    /// from the public client API and a size-triggered flush from entering the drain
+    /// together — two request streams against the endpoint the backoff gate exists to
+    /// protect, and a success in one clearing the gate a failure in the other had just
+    /// armed, which re-opens the one-request-per-evaluation behaviour outright (#2477).
+    /// <para>
+    /// Deliberately a task that never faults: a caller coalesced onto an in-flight
+    /// drain must not inherit the starter's exception or its cancellation.
+    /// </para>
+    /// </remarks>
+    private Task? _inFlightFlush;
+    private readonly object _flushGate = new();
     private volatile bool _isInitialized;
 
     private System.Collections.Concurrent.ConcurrentDictionary<string, SharedFeatureflipCore>? _owningMap;
@@ -634,11 +652,76 @@ internal sealed class SharedFeatureflipCore : IDisposable
         }
     }
 
-    public async Task FlushAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Drains the event queue, coalescing with any drain already in progress.
+    /// </summary>
+    /// <remarks>
+    /// At most one drain runs at a time. A caller that arrives while one is already
+    /// going awaits it and returns — it does NOT start its own, and it does NOT return
+    /// early, because a caller that awaited <c>FlushAsync</c> is asking for its events
+    /// to be sent. This matches the js/node SDKs, whose <c>flush()</c> has always
+    /// returned the in-flight promise. The coalesced caller's own
+    /// <paramref name="cancellationToken"/> still aborts its wait, without cancelling
+    /// the shared drain out from under the caller that started it.
+    /// </remarks>
+    public Task FlushAsync(CancellationToken cancellationToken = default)
     {
-        if (IsShutDown) return;
+        if (IsShutDown) return Task.CompletedTask;
 
-        if (_httpClient == null) return;
+        if (_httpClient == null) return Task.CompletedTask;
+
+        lock (_flushGate)
+        {
+            if (_inFlightFlush is { } existing) return AwaitInFlightFlushAsync(existing, cancellationToken);
+
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _inFlightFlush = completion.Task;
+            return RunDrainAsync(completion, cancellationToken);
+        }
+    }
+
+    /// <summary>Runs the drain and releases the coalescing handle afterwards.</summary>
+    private async Task RunDrainAsync(TaskCompletionSource<bool> completion, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await DrainEventsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_flushGate) _inFlightFlush = null;
+            // Always a result, never an exception: waiters are signalled that the drain
+            // is over, not handed a failure they did not cause and cannot act on.
+            completion.TrySetResult(true);
+        }
+    }
+
+    /// <summary>Waits for an in-flight drain, honouring the waiter's own token.</summary>
+    private static async Task AwaitInFlightFlushAsync(Task inFlight, CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.CanBeCanceled)
+        {
+            await inFlight.ConfigureAwait(false);
+            return;
+        }
+
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), cancelled))
+        {
+            if (await Task.WhenAny(inFlight, cancelled.Task).ConfigureAwait(false) != inFlight)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
+    }
+
+    /// <summary>The drain loop itself, callable when coalescing must be bypassed.</summary>
+    private async Task DrainEventsAsync(CancellationToken cancellationToken)
+    {
+        // Captured once: FlushAsync established this is non-null, but the field is
+        // nullable and this method no longer sits behind that check.
+        var httpClient = _httpClient;
+        if (httpClient == null) return;
 
         // One request per batch rather than one for the whole queue. Re-queuing failures
         // (#2456) is what lets the queue grow to its bound during an outage, and posting
@@ -655,7 +738,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
             try
             {
-                await _httpClient.SendEventsAsync(events, cancellationToken).ConfigureAwait(false);
+                await httpClient.SendEventsAsync(events, cancellationToken).ConfigureAwait(false);
                 Interlocked.Exchange(ref _nextAutoFlushTicks, 0);
                 _logger.LogDebug("Flushed {EventCount} events", events.Count);
             }
@@ -810,15 +893,21 @@ internal sealed class SharedFeatureflipCore : IDisposable
     }
 
     /// <summary>
-    /// Capped exponential reconnect backoff. Returns <paramref name="baseDelay"/> for
-    /// a healthy/clean reconnect (failures &lt;= 1) — deterministic and strictly
-    /// positive so a clean EOF can never busy-loop — then doubles with [d/2, d]
-    /// jitter up to <paramref name="maxDelay"/>. Never terminal: there is no
-    /// maximum retry count.
+    /// Capped exponential reconnect backoff. Every delay carries [d/2, d] jitter —
+    /// including the first (failures &lt;= 1) — then doubles up to
+    /// <paramref name="maxDelay"/>. Never terminal: there is no maximum retry count.
+    /// <para>
+    /// The jitter is load-bearing on the FIRST reconnect, not just the escalating
+    /// ones: the drops this absorbs are fleet-wide (a single edge event severs every
+    /// stream at once — #2457), so every client re-enters here at failures == 0
+    /// together. Returning a constant there replayed the drop's own synchronisation
+    /// as a reconnect spike one base delay later (#2508). Jitter keeps the delay
+    /// strictly positive, so a clean EOF still cannot busy-loop.
+    /// </para>
     /// </summary>
     internal static TimeSpan ComputeReconnectDelay(int consecutiveFailures, TimeSpan baseDelay, TimeSpan maxDelay)
     {
-        if (consecutiveFailures <= 1) return baseDelay;
+        if (consecutiveFailures <= 1) return WithJitter(baseDelay);
         var delay = baseDelay;
         for (var i = 1; i < consecutiveFailures; i++)
         {
@@ -940,6 +1029,17 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 // and keep the polling fallback from arming.
                 if (evt.Type == SseEventType.Sync) reached = true;
                 await ProcessSseEventAsync(evt).ConfigureAwait(false);
+            }
+
+            // The stream opened but ended without ever delivering a `sync`, so it carried
+            // no configuration — a genuinely degraded stream, not the routine mid-frame
+            // sever behind a CDN. SseStreamReader logs that sever at Debug because it
+            // cannot tell the two apart (#2457); this is the layer that can, so the
+            // degraded case keeps its Warning. Excluded on shutdown, where the reader
+            // stops by design rather than by failure.
+            if (!reached && !ct.IsCancellationRequested)
+            {
+                _logger.LogWarning("SSE stream ended without delivering a snapshot; reconnecting");
             }
         }
         catch (HttpRequestException ex)

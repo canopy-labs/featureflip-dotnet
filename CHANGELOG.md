@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.9.0 — 2026-08-26
+
+### Changed
+
+- A `Before`/`After` date operand must now be ISO-8601 or a Unix timestamp in seconds. This SDK made the same `DateTimeOffset.TryParse` call the evaluation engine makes, and so inherited its leniency about the date **format** rather than merely about ISO-8601: `05/15/2023`, `5/15/2023`, `2024/01/01`, `Jan 1 2024`, `January 1, 2024`, `2024.01.01`, `2024-1-1` and `Mon, 15 May 2023 00:00:00 GMT` all resolved here and matched nothing in the go, java, python, ruby, php and js SDKs. A C# customer therefore got a different targeting result than a Go one from the same saved flag config. All seven SDKs now share one grammar. ([#2480](https://github.com/canopy-labs/featureflip/issues/2480))
+- Date operands are now case-sensitive: `2024-01-31t09:30:00z` matches nothing where `2024-01-31T09:30:00Z` matches. The shared grammar is case-sensitive in every SDK. ([#2480](https://github.com/canopy-labs/featureflip/issues/2480))
+- A decimal on the minutes position (`2024-01-31T09:30.5`) is now read as a fraction of seconds and matches, where `DateTimeOffset.TryParse` rejected it outright. This is the one shape where the SDKs agree with each other *against* the engine. ([#2480](https://github.com/canopy-labs/featureflip/issues/2480))
+
+The **evaluation engine deliberately keeps** its leniency, because narrowing it would stop an operand that evaluates today from evaluating at all, for rules customers may already have saved. The Management API now rejects a non-ISO date operand on write, so a rule saved from this release onward cannot carry one. If you have an existing rule using one of these formats, rewrite the operand as ISO-8601 (`2023-05-15`, `2023-05-15T09:30:00Z`, `2023-05-15T09:30:00+05:00`) or as a Unix timestamp in seconds.
+
+- A long-lived SSE stream severed mid-frame is now logged at `Debug` instead of `Warning`. Such a sever is routine behind a CDN or reverse proxy: the client reconnects and the server replays a full `sync` snapshot, so no configuration is missed and nothing is degraded — but reporting it at `Warning` turned ordinary operation into a recurring alarm. A stream that ends *without* ever delivering a snapshot carries no configuration, and is now reported by the core at `Warning`, so a genuinely broken stream stays visible. ([#2457](https://github.com/canopy-labs/featureflip/issues/2457))
+
+### Fixed
+
+- An explicit `FlushAsync` no longer opens a second drain loop while one is already running. The in-flight latch added for [#2456](https://github.com/canopy-labs/featureflip/issues/2456) guarded only the batch-size trigger, so the periodic flush, an explicit `FlushAsync` and a size-triggered flush could enter the loop together — two request streams against an endpoint the backoff gate exists to protect, and worse, a success in one cleared the gate a failure in the other had just armed, re-opening the one-request-per-evaluation behaviour outright. A caller arriving while a drain is running now waits for it and returns, matching the js and node SDKs. Shutdown still bypasses coalescing, because it is the last drain there will ever be. ([#2477](https://github.com/canopy-labs/featureflip/issues/2477))
+
+- The first SSE reconnect after a healthy stream drops is now jittered to `[d/2, d]`, like every other backoff level. The drops this absorbs are fleet-wide — a single edge event severs every stream at once — so every client re-entered the backoff together and waited an identical delay, republishing the drop's own synchronisation as a reconnect spike one backoff later. Measured in production: a drop spread across 2.5–3.0 ms produced a reconnect spread of 26–46 ms. The delay never exceeds the previous one and stays strictly positive, so a stream that fails immediately still cannot busy-loop. ([#2508](https://github.com/canopy-labs/featureflip/issues/2508))
+
 ## 2.8.1 — 2026-08-24
 
 ### Fixed
@@ -122,14 +140,14 @@
   **Migration:**
 
   Before:
-  ```csharp
+  ``csharp
   var client = new FeatureflipClient("your-sdk-key");
-  ```
+  ``
 
   After:
-  ```csharp
+  ``csharp
   var client = FeatureflipClient.Get("your-sdk-key");
-  ```
+  ``
 
   Users of the `Featureflip.Client.Extensions.DependencyInjection` package need no code changes — `AddFeatureflip` now routes through the factory internally and continues to work unchanged.
 

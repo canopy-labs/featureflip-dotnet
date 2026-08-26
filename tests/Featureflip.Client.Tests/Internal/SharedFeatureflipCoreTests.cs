@@ -138,10 +138,12 @@ public class SharedFeatureflipCoreTests
         var baseDelay = TimeSpan.FromSeconds(3);
         var maxDelay = TimeSpan.FromSeconds(30);
 
-        // A healthy/clean reconnect (failures 0 or 1) waits the base delay — the
-        // anti-busy-loop guarantee: it is deterministic and strictly positive.
-        Assert.Equal(baseDelay, SharedFeatureflipCore.ComputeReconnectDelay(0, baseDelay, maxDelay));
-        Assert.Equal(baseDelay, SharedFeatureflipCore.ComputeReconnectDelay(1, baseDelay, maxDelay));
+        // A healthy/clean reconnect (failures 0 or 1) waits [base/2, base] — jittered
+        // like every other level (see the lockstep test below), and still strictly
+        // positive, which is the anti-busy-loop guarantee.
+        var half = TimeSpan.FromTicks(baseDelay.Ticks / 2);
+        Assert.InRange(SharedFeatureflipCore.ComputeReconnectDelay(0, baseDelay, maxDelay), half, baseDelay);
+        Assert.InRange(SharedFeatureflipCore.ComputeReconnectDelay(1, baseDelay, maxDelay), half, baseDelay);
         Assert.True(SharedFeatureflipCore.ComputeReconnectDelay(0, baseDelay, maxDelay) > TimeSpan.Zero);
 
         // Escalates (with [d/2, d] jitter) but never below the base.
@@ -153,6 +155,40 @@ public class SharedFeatureflipCoreTests
         {
             var d = SharedFeatureflipCore.ComputeReconnectDelay(failures, baseDelay, maxDelay);
             Assert.InRange(d, TimeSpan.FromSeconds(15), maxDelay);
+        }
+    }
+
+    [Fact]
+    public void ComputeReconnectDelay_JittersTheFirstReconnect_SoASharedDropDoesNotReconnectInLockstep()
+    {
+        var baseDelay = TimeSpan.FromSeconds(3);
+        var maxDelay = TimeSpan.FromSeconds(30);
+
+        // The drops this backoff absorbs are FLEET-WIDE: a single edge event severs
+        // every stream at once (#2457 — measured at a 2.5-3.0ms spread across both
+        // eval-api pods). Every one of those clients then reconnects at
+        // consecutiveFailures == 0, so that is exactly the path that must be
+        // de-correlated. Returning a constant here republishes the drop's own
+        // synchronisation as a reconnect spike one base delay later — observed in
+        // prod as a 26-46ms reconnect spread, 3.1s after a 2.5-3.0ms drop spread.
+        var samples = new HashSet<TimeSpan>();
+        for (var i = 0; i < 200; i++)
+        {
+            samples.Add(SharedFeatureflipCore.ComputeReconnectDelay(0, baseDelay, maxDelay));
+            samples.Add(SharedFeatureflipCore.ComputeReconnectDelay(1, baseDelay, maxDelay));
+        }
+
+        // Spread, not a single value: many instances waking together must scatter.
+        Assert.True(
+            samples.Count > 1,
+            $"first-reconnect delay is deterministic ({samples.Count} distinct value(s)) — a fleet-wide drop reconnects in lockstep");
+
+        // Same [d/2, d] window the escalating path already uses, so the delay never
+        // exceeds today's and stays strictly positive (the anti-busy-loop guarantee).
+        foreach (var d in samples)
+        {
+            Assert.InRange(d, TimeSpan.FromTicks(baseDelay.Ticks / 2), baseDelay);
+            Assert.True(d > TimeSpan.Zero);
         }
     }
 }

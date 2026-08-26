@@ -95,6 +95,24 @@ public class GoldenVectorTests
     public static IEnumerable<object[]> Conditions() =>
         Vectors.GetProperty("conditionVectors").EnumerateArray().Select(v => new object[] { v });
 
+    /// <summary>
+    /// A date operand outside the ISO grammar must match nothing (#2480).
+    /// <para>
+    /// Hand-authored because the ENGINE DISSENTS. This SDK used to make the engine's identical
+    /// <c>DateTimeOffset.TryParse</c> call and so inherited its leniency about the date FORMAT —
+    /// it resolved <c>05/15/2023</c>, <c>Jan 1 2024</c> and <c>2024.01.01</c> — which meant a C#
+    /// customer got a different targeting result than a Go one for the same saved config. The
+    /// engine keeps that leniency because live customer rules depend on it; an SDK has no such
+    /// constraint, so this one now pins the grammar and these vectors hold it there.
+    /// </para>
+    /// </summary>
+    public static IEnumerable<object[]> DateGrammar() =>
+        Vectors.GetProperty("dateGrammarVectors").EnumerateArray().Select(v => new object[] { v });
+
+    [Theory]
+    [MemberData(nameof(DateGrammar))]
+    public void DateGrammarOp(JsonElement v) => ConditionOp(v);
+
     [Theory]
     [MemberData(nameof(Conditions))]
     public void ConditionOp(JsonElement v)

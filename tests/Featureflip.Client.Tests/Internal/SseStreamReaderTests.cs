@@ -1,5 +1,7 @@
 using System.Text;
 using Featureflip.Client.Internal;
+using Featureflip.Client.Tests.TestSupport;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -260,6 +262,51 @@ public class SseStreamReaderTests
         // The snapshot's structural payload (not just flag keys) round-trips: a
         // dropped segment/rich field would otherwise be swallowed by unknown-member skip.
         Assert.Contains(events[0].Snapshot!.Segments, s => s.Key == "snapshot-segment");
+    }
+
+    [Fact]
+    public async Task MidStreamReadError_IsLoggedAtDebug_NotWarning()
+    {
+        // A stream severed mid-frame is the routine case behind a CDN (#2457): the
+        // reader stops, the core reconnects and re-syncs, and nothing is degraded.
+        // Reporting that at Warning turned ordinary operation into ~10 alarming
+        // lines/day/env, so the severity has to say "expected", not "problem".
+        var logger = new LevelCapturingLogger();
+        using var reader = new SseStreamReader(new SeveringStream(), logger);
+
+        var events = new List<SseEvent>();
+        await foreach (var e in reader.ReadEventsAsync())
+            events.Add(e);
+
+        Assert.Empty(events);
+        Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Warning);
+        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Debug);
+    }
+
+    // A read-only Stream that fails the way a severed SSE connection does: the body
+    // ends mid-frame with an IOException rather than a clean EOF. This is the shape
+    // HttpIOException("The response ended prematurely") arrives in.
+    private sealed class SeveringStream : Stream
+    {
+        private static IOException Severed() => new("The response ended prematurely.");
+
+        public override int Read(byte[] buffer, int offset, int count) => throw Severed();
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+            => throw Severed();
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+            => throw Severed();
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     // A read-only Stream that returns at most `chunk` bytes per read, forcing

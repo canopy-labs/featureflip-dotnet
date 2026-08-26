@@ -513,10 +513,82 @@ internal sealed class FlagEvaluator
     }
 
     /// <summary>
+    /// The ISO-8601 grammar a date operand may use: a calendar date, optionally followed by a time
+    /// (seconds and fractional seconds optional) and an optional offset in either extended
+    /// (<c>+05:00</c> / <c>Z</c>) or basic (<c>+0500</c>) form. The separator may be <c>T</c> or a
+    /// space — the engine accepts both.
+    /// <para>
+    /// Byte-for-byte the grammar go, java, python, ruby, php and js pin. <c>[0-9]</c> and not
+    /// <c>\d</c>, which in .NET matches every Unicode decimal digit (#2467).
+    /// </para>
+    /// </summary>
+    private static readonly Regex IsoOperand = new(
+        @"^([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[T ]([0-9]{2}):([0-9]{2})(?::([0-9]{2}))?(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?)?$",
+        RegexOptions.None);
+
+    /// <summary>
+    /// Rewrites an accepted ISO operand into the strict extended form — <c>T</c> separator, seconds
+    /// present, offset spelled <c>+HH:MM</c> or <c>Z</c> — or returns null when it is not an
+    /// accepted ISO shape.
+    /// <para>
+    /// Gating alone would not be enough, which is why every SDK canonicalizes instead: this SDK
+    /// still hands the result to <c>DateTimeOffset.TryParse</c>, and that parser REJECTS two shapes
+    /// the grammar admits and the other six SDKs resolve — a decimal on the minutes position
+    /// (<c>2024-01-31T09:30.5</c>) and a basic offset (<c>+0500</c>). Rewriting them into the form
+    /// .NET accepts is what makes the seven agree rather than merely narrows this one.
+    /// </para>
+    /// </summary>
+    private static string? CanonicalizeIso(string s)
+    {
+        var m = IsoOperand.Match(s);
+        if (!m.Success)
+        {
+            return null;
+        }
+
+        var date = m.Groups[1].Value;
+        if (!m.Groups[2].Success)
+        {
+            return date;
+        }
+
+        // The engine rejects hour 24 outright rather than rolling it over. An ordinal compare
+        // covers 25..99 too; the group is always exactly two ASCII digits.
+        var hh = m.Groups[2].Value;
+        if (string.CompareOrdinal(hh, "24") >= 0)
+        {
+            return null;
+        }
+
+        var mm = m.Groups[3].Value;
+        var ss = m.Groups[4].Success ? m.Groups[4].Value : "00";
+        var frac = m.Groups[5].Success ? m.Groups[5].Value : string.Empty;
+        var off = m.Groups[6].Success ? m.Groups[6].Value : string.Empty;
+        if (off.Length == 5)
+        {
+            // Basic offset (+0500) -> extended (+05:00). Substring rather than a range so this
+            // still compiles for the netstandard2.0 target.
+            off = off.Substring(0, 3) + ":" + off.Substring(3);
+        }
+
+        return date + "T" + hh + ":" + mm + ":" + ss + frac + off;
+    }
+
+    /// <summary>
     /// Parses <paramref name="value"/> into a UTC-normalized <see cref="DateTimeOffset"/>. Accepts
-    /// ISO-8601 timestamps (offset-bearing or offset-less, with offset-less assumed UTC) and a
-    /// fallback of unix seconds since the epoch. Returns false when the value is neither — mirroring
-    /// the engine's <c>TryParseDateTime</c>.
+    /// an ISO-8601 timestamp matching <see cref="IsoOperand"/> (offset-bearing or offset-less, with
+    /// offset-less assumed UTC) and a fallback of unix seconds since the epoch. Returns false when
+    /// the value is neither.
+    /// <para>
+    /// This DELIBERATELY no longer mirrors the engine's <c>TryParseDateTime</c> (#2480). The engine
+    /// hands the raw operand to <c>DateTimeOffset.TryParse</c>, which is lenient about the date
+    /// FORMAT rather than merely about ISO-8601 — it resolves <c>05/15/2023</c>, <c>Jan 1 2024</c>
+    /// and <c>2024.01.01</c> — and this SDK inherited that by making the identical call, so a C#
+    /// customer got a different targeting result than a Go one for the same saved config. The
+    /// engine keeps its leniency because live customer rules depend on it; an SDK has no such
+    /// constraint, so this one joins the other six instead. Management rejects these operands on
+    /// write, so the gap cannot widen.
+    /// </para>
     /// </summary>
     private static bool TryParseDateTime(string value, out DateTimeOffset result)
     {
@@ -532,8 +604,10 @@ internal sealed class FlagEvaluator
         }
 
         // Use InvariantCulture for consistent date parsing across locales. AssumeUniversal treats
-        // offset-less input as UTC; AdjustToUniversal normalizes offset-bearing input to UTC.
-        if (DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture,
+        // offset-less input as UTC; AdjustToUniversal normalizes offset-bearing input to UTC. The
+        // CANONICALIZED string is parsed, never the raw operand — that is the whole guard.
+        var canonical = CanonicalizeIso(s);
+        if (canonical != null && DateTimeOffset.TryParse(canonical, CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out result))
         {
             return true;

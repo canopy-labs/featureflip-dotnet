@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using Featureflip.Client.Internal;
+using Featureflip.Client.Tests.TestSupport;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -135,6 +137,74 @@ public class SharedFeatureflipCoreRecoveryTests
             // on its own schedule, so a third connect can land here), and only disposing the
             // listener reliably faults that. Joined with a bound as belt and braces — see
             // LoopbackServer.
+            listener.Close();
+            try { await LoopbackServer.JoinAsync(serverTask); } catch { /* cancellation / listener-close expected */ }
+        }
+    }
+
+    /// <summary>
+    /// The counterpart to the reconnect-noise change (#2457): quieting the routine
+    /// mid-stream sever must NOT also quiet a stream that never works. A stream that
+    /// opens 200 and closes without ever sending `sync` delivers no configuration, so
+    /// the core — the only layer that knows whether a snapshot arrived — must warn.
+    /// </summary>
+    [Fact]
+    public async Task StreamThatNeverDeliversSnapshot_IsLoggedAtWarning()
+    {
+        var listener = StartListener(out var baseUrl);
+        using var testTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var serverTask = Task.Run(async () =>
+        {
+            while (!testTimeout.Token.IsCancellationRequested)
+            {
+                var ctx = await listener.GetContextAsync();
+                var path = ctx.Request.Url!.AbsolutePath;
+                if (path.EndsWith("/v1/sdk/flags"))
+                {
+                    await WriteJsonAsync(ctx, AllFlagsJson("flag-a"), testTimeout.Token);
+                }
+                else if (path.EndsWith("/v1/sdk/stream"))
+                {
+                    // 200 text/event-stream, then closed with no `sync` ever written.
+                    ctx.Response.StatusCode = 200;
+                    ctx.Response.ContentType = "text/event-stream";
+                    await ctx.Response.OutputStream.FlushAsync(testTimeout.Token);
+                    ctx.Response.Close();
+                }
+                else
+                {
+                    ctx.Response.StatusCode = 404;
+                    ctx.Response.Close();
+                }
+            }
+        });
+
+        var logger = new LevelCapturingLogger();
+        try
+        {
+            var options = new FeatureFlagOptions
+            {
+                BaseUrl = baseUrl,
+                Streaming = true,
+                WaitForInitialization = false,
+                StartOffline = true,
+                InitTimeout = TimeSpan.FromSeconds(2)
+            };
+            using var core = new SharedFeatureflipCore("sdk-key", options, logger);
+
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (logger.Snapshot().Any(e => e.Level == LogLevel.Warning)) break;
+                await Task.Delay(100, testTimeout.Token);
+            }
+
+            Assert.Contains(logger.Snapshot(), e => e.Level == LogLevel.Warning);
+        }
+        finally
+        {
+            testTimeout.Cancel();
             listener.Close();
             try { await LoopbackServer.JoinAsync(serverTask); } catch { /* cancellation / listener-close expected */ }
         }
