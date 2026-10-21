@@ -56,4 +56,21 @@ public class FeatureFlagOptions
     /// comparable, and a differing callback must not trigger a spurious warning.
     /// </remarks>
     public IList<EvaluationInspector> Inspectors { get; set; } = new List<EvaluationInspector>();
+
+    /// <summary>
+    /// Name of a library that wraps this SDK, such as an OpenFeature provider. Sent after the
+    /// SDK's own token in the User-Agent (<c>featureflip-csharp/&lt;version&gt; my-wrapper/1.0.0</c>) so
+    /// usage through the wrapper can be counted. Must be a valid HTTP product token; an invalid
+    /// one is ignored with a warning. Leave unset when calling the SDK directly.
+    /// </summary>
+    /// <remarks>
+    /// Excluded from the "different options" equality check: it identifies the caller rather
+    /// than changing behavior, and a wrapper sharing an SDK key with the host application would
+    /// otherwise warn on every construction. Honored on the first <see cref="FeatureflipClient.Get"/>
+    /// call for a given SDK key, like every other option.
+    /// </remarks>
+    public string? WrapperName { get; set; }
+
+    /// <summary>Version of the wrapper named by <see cref="WrapperName"/>. Optional.</summary>
+    public string? WrapperVersion { get; set; }
 }

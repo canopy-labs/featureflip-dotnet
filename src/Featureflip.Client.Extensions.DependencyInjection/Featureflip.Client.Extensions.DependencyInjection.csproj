@@ -6,8 +6,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Featureflip.Client</RootNamespace>
     <PackageId>Featureflip.Client.Extensions.DependencyInjection</PackageId>
-    <Version>2.9.0</Version>
+    <Version>2.10.0</Version>
     <Description>Dependency injection extensions for Featureflip.Client</Description>
+    <!-- NuGet renders no notes without this, so the package page said nothing about
+         what changed in any version (#2553). Points at the PUBLIC mirror's Release:
+         the monorepo is private, so a link there 404s for every consumer of this
+         package. $(Version) is rewritten from the tag at publish time, and the mirror
+         tags as plain v<version>, so this resolves to the right release. -->
+    <PackageReleaseNotes>https://github.com/canopy-labs/featureflip-dotnet/releases/tag/v$(Version)</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>

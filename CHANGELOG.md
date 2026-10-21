@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.10.0 — 2026-10-20
+
+### Added
+
+- Every request now sends `User-Agent: featureflip-csharp/<version>`, on the flag fetch, event post and SSE stream alike. The SDK previously sent no User-Agent at all, so .NET usage could not be told apart from anything else reaching the Evaluation API. The version comes from the assembly's informational version, which the release tag sets, so it cannot go stale between releases. (#4139)
+- `FeatureFlagOptions.WrapperName` and `WrapperVersion`, for libraries that wrap this SDK (an OpenFeature provider, an internal platform client). When set, the wrapper's token follows the SDK's in the User-Agent, e.g. `featureflip-csharp/<version> my-wrapper/1.0.0`. A name that is not a valid HTTP product token is ignored with a warning rather than failing construction. (#4139)
+
 ## 2.9.0 — 2026-08-26
 
 ### Changed

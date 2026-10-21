@@ -41,6 +41,7 @@ internal sealed class FeatureFlagHttpClient : IDisposable
             Timeout = options.ReadTimeout
         };
         _httpClient.DefaultRequestHeaders.Add("Authorization", sdkKey);
+        SdkIdentity.Apply(_httpClient.DefaultRequestHeaders, options, logger);
 
         // Dedicated client for the long-lived SSE stream. HttpClient.Timeout is a *total*
         // request timeout in .NET, so applying the finite ReadTimeout here would abort the
@@ -50,6 +51,9 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         // connection establishment). Mirrors the Go/Java/Python SDKs.
         _streamingClient = CreateStreamingClient(baseAddress, options.ConnectTimeout);
         _streamingClient.DefaultRequestHeaders.Add("Authorization", sdkKey);
+        // The stream's own client needs the token too; it shares no headers with the one above.
+        // Applied with a null logger so an invalid wrapper warns once, not once per client.
+        SdkIdentity.Apply(_streamingClient.DefaultRequestHeaders, options, logger: null);
 
         _jsonOptions = new JsonSerializerOptions
         {
