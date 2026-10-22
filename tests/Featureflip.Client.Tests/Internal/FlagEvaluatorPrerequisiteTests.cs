@@ -194,6 +194,48 @@ public class FlagEvaluatorPrerequisiteTests
         _ = prereqEvaluations; // silence unused
     }
 
+    [Fact]
+    public void Evaluate_DisabledFlagWithUnknownOffVariation_IsError()
+    {
+        var flag = BoolFlag("f", enabled: false, offVariation: "zzz");
+
+        var result = _evaluator.Evaluate(flag, new EvaluationContext { UserId = "u1" }, ToMap(flag));
+
+        Assert.Equal(EvaluationReason.Error, result.Reason);
+        Assert.Equal("zzz", result.VariationKey);
+    }
+
+    [Fact]
+    public void Evaluate_FailedPrerequisiteWithUnknownOffVariation_IsErrorNotPrerequisiteFailed()
+    {
+        var parent = BoolFlag("parent", enabled: false);
+        var child = BoolFlag("child", enabled: true, offVariation: "zzz", prerequisites: new[]
+        {
+            new Prerequisite { PrerequisiteFlagKey = "parent", ExpectedVariationKey = "on" }
+        });
+
+        var result = _evaluator.Evaluate(child, new EvaluationContext { UserId = "u1" }, ToMap(parent, child));
+
+        Assert.Equal(EvaluationReason.Error, result.Reason);
+        Assert.Equal("zzz", result.VariationKey);
+        Assert.Null(result.PrerequisiteKey);
+    }
+
+    [Fact]
+    public void Evaluate_DependentOfUnknownOffPrerequisite_IsErrorServingItsOwnOff()
+    {
+        var parent = BoolFlag("parent", enabled: false, offVariation: "zzz");
+        var child = BoolFlag("child", enabled: true, prerequisites: new[]
+        {
+            new Prerequisite { PrerequisiteFlagKey = "parent", ExpectedVariationKey = "on" }
+        });
+
+        var result = _evaluator.Evaluate(child, new EvaluationContext { UserId = "u1" }, ToMap(parent, child));
+
+        Assert.Equal(EvaluationReason.Error, result.Reason);
+        Assert.Equal("off", result.VariationKey);
+    }
+
     private static IReadOnlyDictionary<string, FlagConfiguration> ToMap(params FlagConfiguration[] flags)
     {
         var d = new Dictionary<string, FlagConfiguration>(StringComparer.Ordinal);
@@ -204,7 +246,8 @@ public class FlagEvaluatorPrerequisiteTests
     private static FlagConfiguration BoolFlag(
         string key,
         bool enabled,
-        IEnumerable<Prerequisite>? prerequisites = null)
+        IEnumerable<Prerequisite>? prerequisites = null,
+        string offVariation = "off")
     {
         return new FlagConfiguration
         {
@@ -219,7 +262,7 @@ public class FlagEvaluatorPrerequisiteTests
             },
             Rules = new List<TargetingRule>(),
             Fallthrough = new ServeConfig { Type = ServeType.Fixed, Variation = "on" },
-            OffVariation = "off",
+            OffVariation = offVariation,
             Prerequisites = prerequisites?.ToList() ?? new List<Prerequisite>(),
         };
     }

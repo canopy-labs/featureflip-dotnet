@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.11.0 — 2026-10-22
+
+### Changed
+
+- A percentage rollout that can't bucket the context (no `user_id`, or no value for its bucket-by attribute) now skips the rule and evaluation continues with the next rule or the fallthrough. Previously the SDK served the rollout's first variation, which is the variation being rolled out. A warning is logged once per flag and rule. (#4236)
+- Boolean values used as a rollout bucket value now hash as `true`/`false` (previously `True`/`False`), matching the Evaluation API, so the same context gets the same variant in every SDK. Only a context whose user id is a boolean is affected. This also applies to JSON-element attribute values. (#4236)
+- Decimal numbers used as a rollout bucket value now hash in one canonical spelling shared with the Evaluation API (for example `1.0` hashes as `1`), so the same context gets the same variant in every SDK. Integer values are unchanged. A context whose user id is a non-integer number may get a different variant. A `decimal` with no fractional part hashes as its exact integer digits; any other `decimal` is converted to a double first. (#4236)
+- Malformed variation references now evaluate to reason `Error` the way the Evaluation API does. A rule or fallthrough that serves a key the flag doesn't define (the detail already reported `Error` and the default) no longer reports the rule id, and a served empty-string key with no empty-string variation is now an `Error` too. A flag whose prerequisite serves an undefined variation, or whose own off variation is undefined, now reports `Error` (still serving its off variation) instead of `PrerequisiteFailed` or `FlagDisabled`. (#4236)
+
 ## 2.10.0 — 2026-10-20
 
 ### Added

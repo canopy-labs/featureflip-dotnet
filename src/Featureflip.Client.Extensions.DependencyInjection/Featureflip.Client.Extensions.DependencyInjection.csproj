@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Featureflip.Client</RootNamespace>
     <PackageId>Featureflip.Client.Extensions.DependencyInjection</PackageId>
-    <Version>2.10.0</Version>
+    <Version>2.11.0</Version>
     <Description>Dependency injection extensions for Featureflip.Client</Description>
     <!-- NuGet renders no notes without this, so the package page said nothing about
          what changed in any version (#2553). Points at the PUBLIC mirror's Release:

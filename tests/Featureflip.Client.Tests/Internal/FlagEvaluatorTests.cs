@@ -227,7 +227,7 @@ public class FlagEvaluatorTests
                             }
                         }
                     },
-                    Serve = new ServeConfig { Type = ServeType.Fixed, Variation = "variation1" }
+                    Serve = new ServeConfig { Type = ServeType.Fixed, Variation = "on" }
                 },
                 new TargetingRule
                 {
@@ -249,7 +249,7 @@ public class FlagEvaluatorTests
                             }
                         }
                     },
-                    Serve = new ServeConfig { Type = ServeType.Fixed, Variation = "variation2" }
+                    Serve = new ServeConfig { Type = ServeType.Fixed, Variation = "off" }
                 }
             },
             fallthrough: new ServeConfig { Type = ServeType.Fixed, Variation = "off" });
@@ -259,7 +259,7 @@ public class FlagEvaluatorTests
         var result = _evaluator.Evaluate(flag, context);
 
         // Assert
-        Assert.Equal("variation2", result.VariationKey);
+        Assert.Equal("off", result.VariationKey);
         Assert.Equal(EvaluationReason.RuleMatch, result.Reason);
         Assert.Equal("rule2", result.RuleId);
     }
@@ -1143,51 +1143,165 @@ public class FlagEvaluatorRolloutTests
         Assert.Equal(resultExplicit.VariationKey, resultDefault.VariationKey);
     }
 
-    [Fact]
-    public void Rollout_KeylessContext_ServesControlVariationDeterministically()
+    private static ServeConfig RolloutServe(string? bucketBy = null) => new ServeConfig
     {
-        // Arrange - keyless/anonymous context can't be bucketed. The thin control
-        // weight (1) ensures the old empty-hash collapse would NOT land on "on",
-        // so this fails pre-fix. After the fix, a keyless userId rollout serves the
-        // control (first) variation deterministically (#1457).
-        var flag = new FlagConfiguration
+        Type = ServeType.Rollout,
+        BucketBy = bucketBy,
+        Salt = "test-salt",
+        Variations = new List<WeightedVariation>
         {
-            Key = "rollout-flag",
-            Version = 1,
-            Type = FlagType.Boolean,
-            Enabled = true,
-            Variations = new List<Variation>
-            {
-                new Variation { Key = "on", Value = JsonSerializer.SerializeToElement(true) },
-                new Variation { Key = "off", Value = JsonSerializer.SerializeToElement(false) }
-            },
-            Rules = new List<TargetingRule>(),
-            Fallthrough = new ServeConfig
-            {
-                Type = ServeType.Rollout,
-                BucketBy = "userId",
-                Salt = "test-salt",
-                Variations = new List<WeightedVariation>
-                {
-                    new WeightedVariation { Key = "on", Weight = 1 },
-                    new WeightedVariation { Key = "off", Weight = 99 }
-                }
-            },
-            OffVariation = "off"
-        };
-
-        // keyless/anonymous context: no UserId set
-        var context = new EvaluationContext();
-
-        // Act - evaluate the keyless context many times
-        var results = new List<string>();
-        for (int i = 0; i < 20; i++)
-        {
-            results.Add(_evaluator.Evaluate(flag, context).VariationKey);
+            new WeightedVariation { Key = "on", Weight = 1 },
+            new WeightedVariation { Key = "off", Weight = 99 }
         }
+    };
 
-        // Assert - always the control (first) variation, stable across evals
-        Assert.All(results, r => Assert.Equal("on", r));
+    private static FlagConfiguration KeylessFlag(string key, string? bucketBy, List<TargetingRule>? rules = null, bool enabled = true) => new FlagConfiguration
+    {
+        Key = key,
+        Version = 1,
+        Type = FlagType.Boolean,
+        Enabled = enabled,
+        Variations = new List<Variation>
+        {
+            new Variation { Key = "on", Value = JsonSerializer.SerializeToElement(true) },
+            new Variation { Key = "off", Value = JsonSerializer.SerializeToElement(false) }
+        },
+        Rules = rules ?? new List<TargetingRule>(),
+        Fallthrough = new ServeConfig { Type = ServeType.Fixed, Variation = "off" },
+        OffVariation = "off"
+    };
+
+    private static TargetingRule AlwaysRule(string id, int priority, ServeConfig serve) => new TargetingRule
+    {
+        Id = id,
+        Priority = priority,
+        ConditionGroups = new List<ConditionGroup>(),
+        Serve = serve
+    };
+
+    [Fact]
+    public void Rollout_KeylessContext_SkipsRolloutAndServesFallthrough()
+    {
+        // The thin control weight (1) means the old "serve the first variation" fallback
+        // would give "on"; the skip serves the fallthrough's variation instead (#4236).
+        var flag = CreateRolloutFlag(
+            new List<WeightedVariation>
+            {
+                new WeightedVariation { Key = "on", Weight = 1 },
+                new WeightedVariation { Key = "off", Weight = 99 }
+            },
+            bucketBy: "userId");
+
+        var result = _evaluator.Evaluate(flag, new EvaluationContext());
+
+        Assert.Equal("off", result.VariationKey);
+        Assert.Equal(EvaluationReason.Fallthrough, result.Reason);
+    }
+
+    [Fact]
+    public void Rollout_KeylessRolloutRule_SkipsToNextRule()
+    {
+        var flag = KeylessFlag("skip-next-rule", null, new List<TargetingRule>
+        {
+            AlwaysRule("r1", 1, RolloutServe()),
+            AlwaysRule("r2", 2, new ServeConfig { Type = ServeType.Fixed, Variation = "on" })
+        });
+
+        var result = _evaluator.Evaluate(flag, new EvaluationContext());
+
+        Assert.Equal("on", result.VariationKey);
+        Assert.Equal(EvaluationReason.RuleMatch, result.Reason);
+        Assert.Equal("r2", result.RuleId);
+    }
+
+    [Fact]
+    public void Rollout_CustomBucketByMissing_WithUserIdPresent_ServesFallthrough()
+    {
+        var flag = CreateRolloutFlag(
+            new List<WeightedVariation>
+            {
+                new WeightedVariation { Key = "on", Weight = 99 },
+                new WeightedVariation { Key = "off", Weight = 1 }
+            },
+            bucketBy: "anonymous_id");
+
+        var result = _evaluator.Evaluate(flag, new EvaluationContext { UserId = "user-1" });
+
+        Assert.Equal("off", result.VariationKey);
+        Assert.Equal(EvaluationReason.Fallthrough, result.Reason);
+    }
+
+    [Fact]
+    public void Rollout_WithoutVariations_Keyless_DegradesAndDoesNotWarn()
+    {
+        var logger = new TestSupport.LevelCapturingLogger();
+        var evaluator = new FlagEvaluator(logger);
+        var flag = KeylessFlag("degrade-no-variations", null, new List<TargetingRule>
+        {
+            AlwaysRule("r1", 1, new ServeConfig { Type = ServeType.Rollout, Variation = "on" })
+        });
+
+        var result = evaluator.Evaluate(flag, new EvaluationContext());
+
+        Assert.Equal("on", result.VariationKey);
+        Assert.Equal("r1", result.RuleId);
+        Assert.Empty(logger.Snapshot());
+    }
+
+    [Fact]
+    public void Rollout_Keyless_WarnsOncePerFlagRuleAndBucketBy_WithoutContextValues()
+    {
+        var logger = new TestSupport.LevelCapturingLogger();
+        var evaluator = new FlagEvaluator(logger);
+        var flag = KeylessFlag("warn-once-flag", null, new List<TargetingRule>
+        {
+            AlwaysRule("r1", 1, RolloutServe())
+        });
+        var context = new EvaluationContext { Email = "secret@example.com" };
+
+        evaluator.Evaluate(flag, context);
+        evaluator.Evaluate(flag, context);
+
+        var entries = logger.Snapshot();
+        var entry = Assert.Single(entries);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, entry.Level);
+        Assert.Contains("warn-once-flag", entry.Message);
+        Assert.Contains("rule r1", entry.Message);
+        Assert.Contains("userId", entry.Message);
+        Assert.DoesNotContain("secret@example.com", entry.Message);
+    }
+
+    [Fact]
+    public void Rollout_DisabledFlag_Keyless_DoesNotWarn()
+    {
+        var logger = new TestSupport.LevelCapturingLogger();
+        var evaluator = new FlagEvaluator(logger);
+        var flag = KeylessFlag("warn-disabled-flag", null, new List<TargetingRule>
+        {
+            AlwaysRule("r1", 1, RolloutServe())
+        }, enabled: false);
+
+        var result = evaluator.Evaluate(flag, new EvaluationContext());
+
+        Assert.Equal(EvaluationReason.FlagDisabled, result.Reason);
+        Assert.Empty(logger.Snapshot());
+    }
+
+    [Fact]
+    public void UnbucketableWarnings_CapsAt1000Keys_AndDropsSilently()
+    {
+        var logger = new TestSupport.LevelCapturingLogger();
+        var warnings = new UnbucketableWarnings();
+
+        for (var i = 0; i < UnbucketableWarnings.MaxKeys; i++)
+        {
+            warnings.Record(logger, "cap-flag-" + i, "r1", "userId");
+        }
+        Assert.Equal(UnbucketableWarnings.MaxKeys, logger.Snapshot().Count);
+
+        warnings.Record(logger, "cap-flag-overflow", "r1", "userId");
+
+        Assert.Equal(UnbucketableWarnings.MaxKeys, logger.Snapshot().Count);
     }
 
     private static FlagConfiguration RolloutFlagWithSalt(string? salt) => new FlagConfiguration
@@ -1233,9 +1347,74 @@ public class FlagEvaluatorRolloutTests
         }
     }
 
+    [Theory]
+    [InlineData("true", "true")]
+    [InlineData("false", "false")]
+    [InlineData("1.0", "1")]
+    [InlineData("-0", "0")]
+    [InlineData("42", "42")]
+    [InlineData("\"x\"", "x")]
+    public void Rollout_JsonElementAttribute_BucketsLikeEngineSpelling(string json, string expected)
+    {
+        var element = JsonDocument.Parse(json).RootElement.Clone();
+        for (var i = 0; i < 64; i++)
+        {
+            var flag = new FlagConfiguration
+            {
+                Key = "rollout-flag",
+                Version = 1,
+                Type = FlagType.Boolean,
+                Enabled = true,
+                Variations = new List<Variation>
+                {
+                    new Variation { Key = "on", Value = JsonSerializer.SerializeToElement(true) },
+                    new Variation { Key = "off", Value = JsonSerializer.SerializeToElement(false) }
+                },
+                Rules = new List<TargetingRule>(),
+                Fallthrough = new ServeConfig
+                {
+                    Type = ServeType.Rollout,
+                    BucketBy = "tenant",
+                    Salt = "salt-" + i,
+                    Variation = "off",
+                    Variations = new List<WeightedVariation>
+                    {
+                        new WeightedVariation { Key = "on", Weight = 50 },
+                        new WeightedVariation { Key = "off", Weight = 50 }
+                    }
+                },
+                OffVariation = "off"
+            };
+
+            var viaElement = _evaluator.Evaluate(flag, new EvaluationContext().Set("tenant", element));
+            var viaString = _evaluator.Evaluate(flag, new EvaluationContext().Set("tenant", expected));
+
+            Assert.Equal(viaString.VariationKey, viaElement.VariationKey);
+        }
+    }
+
+    [Fact]
+    public void Rollout_JsonElementNull_IsTreatedAsMissing()
+    {
+        var element = JsonDocument.Parse("null").RootElement.Clone();
+        var flag = CreateRolloutFlag(
+            variations: new List<WeightedVariation>
+            {
+                new WeightedVariation { Key = "on", Weight = 100 }
+            },
+            bucketBy: "tenant");
+
+        var viaNull = _evaluator.Evaluate(flag, new EvaluationContext().Set("tenant", element));
+        var viaMissing = _evaluator.Evaluate(flag, new EvaluationContext());
+
+        Assert.Equal(viaMissing.VariationKey, viaNull.VariationKey);
+        Assert.Equal(viaMissing.Reason, viaNull.Reason);
+    }
+
     private static FlagConfiguration CreateRolloutFlag(
         List<WeightedVariation> variations,
-        string? bucketBy = null)
+        string? bucketBy = null,
+        string? fallthroughVariation = "off")
     {
         return new FlagConfiguration
         {
@@ -1253,6 +1432,7 @@ public class FlagEvaluatorRolloutTests
             {
                 Type = ServeType.Rollout,
                 BucketBy = bucketBy,
+                Variation = fallthroughVariation,
                 Variations = variations
             },
             OffVariation = "off"

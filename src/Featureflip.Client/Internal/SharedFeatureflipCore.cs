@@ -130,7 +130,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
         _inspectors = NormalizeInspectors(_options.Inspectors);
         _store = new FlagStore();
         _storeSubscription = _store.OnChange(NotifyFlagsChanged);
-        _evaluator = new FlagEvaluator();
+        _evaluator = new FlagEvaluator(_logger);
         _eventProcessor = new EventProcessor(_options.FlushInterval, _options.FlushBatchSize);
         _httpClient = new FeatureFlagHttpClient(sdkKey, _options, _logger);
         _cts = new CancellationTokenSource();

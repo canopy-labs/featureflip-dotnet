@@ -232,10 +232,11 @@ public class GoldenVectorTests
         // Variation key
         Assert.Equal(expected.GetProperty("variation").GetString(), result.VariationKey);
 
-        // Value — look up the variation's JsonElement value from the flag config
-        var variation = flag.Variations.First(var => var.Key == result.VariationKey);
+        // Value — look up the variation's JsonElement value from the flag config. A served key
+        // the flag doesn't define (reason Error, #4236) has no value: the vector expects null.
+        var variation = flag.Variations.FirstOrDefault(var => var.Key == result.VariationKey);
         Assert.Equal(expected.GetProperty("value").GetRawText(),
-            JsonSerializer.Serialize(variation.Value));
+            variation is null ? "null" : JsonSerializer.Serialize(variation.Value));
 
         // Reason
         var er = expected.GetProperty("reason");

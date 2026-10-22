@@ -4,6 +4,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Featureflip.Client.Internal.Models;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Featureflip.Client.Internal;
 
@@ -37,6 +39,17 @@ internal sealed class FlagEvaluator
     // Safety net against pathological prerequisite chains. Cycles are blocked at
     // write time on the server, so reaching this limit indicates a corrupt config.
     internal const int MaxPrerequisiteDepth = 10;
+
+    private readonly ILogger _logger;
+
+    public FlagEvaluator() : this(NullLogger.Instance)
+    {
+    }
+
+    internal FlagEvaluator(ILogger logger)
+    {
+        _logger = logger ?? NullLogger.Instance;
+    }
 
 #if NETSTANDARD2_0
     // Cache MD5 instance per thread to avoid allocation overhead
@@ -99,13 +112,13 @@ internal sealed class FlagEvaluator
     {
         if (depth > MaxPrerequisiteDepth)
         {
-            return new EvaluationResult(flag.OffVariation, EvaluationReason.Error);
+            return OffResult(flag, EvaluationReason.Error);
         }
 
         // If flag is disabled, return off variation
         if (!flag.Enabled)
         {
-            return new EvaluationResult(flag.OffVariation, EvaluationReason.FlagDisabled);
+            return OffResult(flag, EvaluationReason.FlagDisabled);
         }
 
         // Resolve prerequisites in order. A failing prerequisite short-circuits to the
@@ -121,11 +134,7 @@ internal sealed class FlagEvaluator
             {
                 // Missing flag: fail safely. Write-time delete-blocking should normally
                 // prevent this — treat as a prerequisite failure.
-                var miss = new EvaluationResult(
-                    flag.OffVariation,
-                    EvaluationReason.PrerequisiteFailed,
-                    ruleId: null,
-                    prerequisiteKey: prereq.PrerequisiteFlagKey);
+                var miss = OffResult(flag, EvaluationReason.PrerequisiteFailed, prereq.PrerequisiteFlagKey);
                 memo[flag.Key] = miss;
                 return miss;
             }
@@ -137,18 +146,14 @@ internal sealed class FlagEvaluator
 
             if (prereqResult.Reason == EvaluationReason.Error)
             {
-                var err = new EvaluationResult(flag.OffVariation, EvaluationReason.Error);
+                var err = OffResult(flag, EvaluationReason.Error);
                 memo[flag.Key] = err;
                 return err;
             }
 
             if (prereqResult.VariationKey != prereq.ExpectedVariationKey)
             {
-                var failed = new EvaluationResult(
-                    flag.OffVariation,
-                    EvaluationReason.PrerequisiteFailed,
-                    ruleId: null,
-                    prerequisiteKey: prereq.PrerequisiteFlagKey);
+                var failed = OffResult(flag, EvaluationReason.PrerequisiteFailed, prereq.PrerequisiteFlagKey);
                 memo[flag.Key] = failed;
                 return failed;
             }
@@ -161,7 +166,22 @@ internal sealed class FlagEvaluator
         {
             if (EvaluateRule(rule, context, getSegment))
             {
-                var variationKey = ResolveServeConfig(rule.Serve!, context);
+                var variationKey = ResolveServeConfig(rule.Serve!, context, flag.Key, rule.Id);
+                if (variationKey == null)
+                {
+                    // Can't bucket this context: the rule doesn't match, try the next one.
+                    continue;
+                }
+
+                if (!HasVariation(flag, variationKey))
+                {
+                    // The served key names no variation: malformed config. Report Error (no
+                    // rule id) with the served key, like the engine's ServeVariation (#4236).
+                    var missing = new EvaluationResult(variationKey, EvaluationReason.Error);
+                    memo[flag.Key] = missing;
+                    return missing;
+                }
+
                 var ruleResult = new EvaluationResult(variationKey, EvaluationReason.RuleMatch, rule.Id);
                 memo[flag.Key] = ruleResult;
                 return ruleResult;
@@ -171,7 +191,17 @@ internal sealed class FlagEvaluator
         // No rules matched, use fallthrough
         if (flag.Fallthrough != null)
         {
-            var variationKey = ResolveServeConfig(flag.Fallthrough, context);
+            // A fallthrough that can't bucket serves its Variation (the same degrade as a
+            // rollout without variations) with the normal fallthrough reason.
+            var variationKey = ResolveServeConfig(flag.Fallthrough, context, flag.Key, null)
+                ?? flag.Fallthrough.Variation ?? string.Empty;
+            if (!HasVariation(flag, variationKey))
+            {
+                var missing = new EvaluationResult(variationKey, EvaluationReason.Error);
+                memo[flag.Key] = missing;
+                return missing;
+            }
+
             var fallResult = new EvaluationResult(variationKey, EvaluationReason.Fallthrough);
             memo[flag.Key] = fallResult;
             return fallResult;
@@ -181,6 +211,30 @@ internal sealed class FlagEvaluator
         var offResult = new EvaluationResult(flag.OffVariation, EvaluationReason.Fallthrough);
         memo[flag.Key] = offResult;
         return offResult;
+    }
+
+    /// <summary>
+    /// Serves the flag's off variation. An off variation the flag doesn't define is malformed
+    /// config: Error with the key, like the engine's ServeVariation (#4236).
+    /// </summary>
+    private static EvaluationResult OffResult(FlagConfiguration flag, EvaluationReason reason, string? prerequisiteKey = null)
+    {
+        if (!HasVariation(flag, flag.OffVariation))
+        {
+            return new EvaluationResult(flag.OffVariation, EvaluationReason.Error);
+        }
+
+        return new EvaluationResult(flag.OffVariation, reason, ruleId: null, prerequisiteKey: prerequisiteKey);
+    }
+
+    private static bool HasVariation(FlagConfiguration flag, string key)
+    {
+        foreach (var v in flag.Variations)
+        {
+            if (v.Key == key) return true;
+        }
+
+        return false;
     }
 
     private bool EvaluateRule(TargetingRule rule, EvaluationContext context, Func<string, Segment?>? getSegment)
@@ -286,6 +340,55 @@ internal sealed class FlagEvaluator
             default:
                 result = 0;
                 return false;
+        }
+    }
+
+    /// <summary>
+    /// Bucket-path spelling: floating types use the canonical number spelling shared with the
+    /// Evaluation API (#4236); booleans are JSON's "true"/"false" (not bool.ToString()'s
+    /// "True"/"False"); everything else (integers, strings) is unchanged.
+    /// Conditions keep <see cref="ConvertToString"/>.
+    /// </summary>
+    private static string ConvertToBucketString(object? value) => value switch
+    {
+        bool b => b ? "true" : "false",
+        System.Text.Json.JsonElement je => FormatJsonElementForBucket(je),
+        double d => CanonicalNumber.Format(d),
+        float f => CanonicalNumber.Format(f),
+        // An integral decimal keeps its exact integer digits (like the engine's raw integer
+        // text); anything else goes through double.
+        decimal m => m == decimal.Truncate(m)
+            ? (m == 0m ? "0" : decimal.Truncate(m).ToString("0", System.Globalization.CultureInfo.InvariantCulture))
+            : CanonicalNumber.Format((double)m),
+        _ => ConvertToString(value)
+    };
+
+    /// <summary>Mirrors the Evaluation API's BucketValueFormatter for JSON-element attributes.</summary>
+    private static string FormatJsonElementForBucket(System.Text.Json.JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case System.Text.Json.JsonValueKind.True: return "true";
+            case System.Text.Json.JsonValueKind.False: return "false";
+            case System.Text.Json.JsonValueKind.Null:
+            case System.Text.Json.JsonValueKind.Undefined:
+                return string.Empty; // missing: the rollout can't bucket
+            case System.Text.Json.JsonValueKind.Number:
+                var raw = element.GetRawText();
+                var start = raw.Length > 0 && raw[0] == '-' ? 1 : 0;
+                var integral = start < raw.Length;
+                for (var i = start; i < raw.Length; i++)
+                {
+                    if (raw[i] < '0' || raw[i] > '9') { integral = false; break; }
+                }
+                if (integral)
+                {
+                    // Negative zero is zero in every SDK's JSON parser, which spells it "0".
+                    return start == 1 && raw.Substring(1).Trim('0').Length == 0 ? "0" : raw;
+                }
+                return CanonicalNumber.Format(element.GetDouble());
+            default:
+                return element.ToString();
         }
     }
 
@@ -630,7 +733,11 @@ internal sealed class FlagEvaluator
         return false;
     }
 
-    private string ResolveServeConfig(ServeConfig serve, EvaluationContext context)
+    /// <summary>
+    /// Resolves a serve to a variation key, or <c>null</c> when a rollout can't bucket the
+    /// context (no value for its bucket-by attribute). Fixed serves never return null.
+    /// </summary>
+    private string? ResolveServeConfig(ServeConfig serve, EvaluationContext context, string flagKey, string? ruleId)
     {
         if (serve.Type == ServeType.Fixed)
         {
@@ -639,21 +746,20 @@ internal sealed class FlagEvaluator
 
         // Rollout
         var bucketBy = serve.BucketBy ?? "userId";
-        var bucketValue = ConvertToString(context.GetAttribute(bucketBy));
+        var bucketValue = ConvertToBucketString(context.GetAttribute(bucketBy));
 
         if (serve.Variations == null || serve.Variations.Count == 0)
         {
             return serve.Variation ?? string.Empty;
         }
 
-        // Keyless user contexts can't be bucketed. Rather than hashing the empty value
-        // into an arbitrary salt-dependent bucket, serve the control (first) variation
-        // deterministically. The engine assigns a random GUID per eval (spreading
-        // anonymous users over HTTP); local SDK eval is deterministic, so parity is
-        // guaranteed only for keyed contexts (#1457).
-        if (string.IsNullOrEmpty(bucketValue) && (bucketBy == "userId" || bucketBy == "user_id"))
+        // A rollout with no value for its bucket-by attribute can't be placed in a bucket.
+        // Skip it rather than serving an arbitrary variation (#4236). Whitespace, "0" and
+        // false are real values and bucket normally.
+        if (string.IsNullOrEmpty(bucketValue))
         {
-            return serve.Variations[0].Key;
+            UnbucketableWarnings.Warn(_logger, flagKey, ruleId, bucketBy);
+            return null;
         }
 
         var salt = serve.Salt ?? "";
