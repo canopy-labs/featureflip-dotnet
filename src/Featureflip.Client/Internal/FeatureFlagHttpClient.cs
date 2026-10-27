@@ -1,6 +1,5 @@
 using System.Net.Http.Json;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Featureflip.Client.Internal.Models;
 using Microsoft.Extensions.Logging;
 
@@ -11,6 +10,13 @@ internal sealed class FeatureFlagHttpClient : IDisposable
     private readonly HttpClient _httpClient;
     private readonly HttpClient _streamingClient;
     private readonly JsonSerializerOptions _jsonOptions;
+
+    /// <summary>
+    /// Source-generated metadata bound to <see cref="_jsonOptions"/>, so neither the fetch
+    /// nor the post needs reflection (#4301). Every call below goes through a typed
+    /// <c>JsonTypeInfo</c> overload rather than the options one.
+    /// </summary>
+    private readonly FeatureflipJsonContext _json;
 
     /// <summary>
     /// Optional so the many tests that construct this client directly need not supply one.
@@ -55,26 +61,31 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         // Applied with a null logger so an invalid wrapper warns once, not once per client.
         SdkIdentity.Apply(_streamingClient.DefaultRequestHeaders, options, logger: null);
 
-        _jsonOptions = new JsonSerializerOptions
+        _json = new FeatureflipJsonContext(new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            // TolerantConditionOperatorConverter FIRST: System.Text.Json picks the first
-            // converter that handles a type, so it must precede the stock enum converter to
-            // win for ConditionOperator. It maps an unknown operator to a sentinel instead of
-            // throwing, which previously failed the WHOLE flags payload over one condition (#2372).
+            // System.Text.Json picks the first converter that handles a type, and an
+            // options-registered converter outranks the generated default. These four cover
+            // every enum on the wire, each mapping an unknown NAME to a sentinel instead of
+            // throwing, which previously failed the WHOLE flags payload over one condition
+            // (#2372, #2402), and each rejecting an integer, a TYPE violation — see
+            // SseStreamReader.SnapshotJsonOptions for why that is a silent-wrong hazard and a
+            // different axis from the string tolerance (#2315).
             //
-            // allowIntegerValues: false rejects an integer enum, a TYPE violation — see
-            // SseStreamReader.SnapshotJsonOptions for why that default is a silent-wrong
-            // hazard, and why it is a different axis from #2372's string tolerance (#2315).
+            // The stock JsonStringEnumConverter that used to follow them is gone: it was
+            // unreachable (every wire enum is claimed above) and its non-generic form needs
+            // runtime code generation, which NativeAOT does not have (#4301).
+            // SourceGeneratedJsonTests pins that every enum the payload reaches resolves to
+            // one of these, so a new wire enum cannot silently fall back to integers.
             Converters =
             {
                 new TolerantConditionOperatorConverter(),
                 new TolerantFlagTypeConverter(),
                 new TolerantServeTypeConverter(),
-                new TolerantConditionLogicConverter(),
-                new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false)
+                new TolerantConditionLogicConverter()
             }
-        };
+        });
+        _jsonOptions = _json.Options;
     }
 
     private static HttpClient CreateStreamingClient(Uri baseAddress, TimeSpan connectTimeout)
@@ -111,7 +122,7 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         var response = await _httpClient.GetAsync("v1/sdk/flags", ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var parsed = await response.Content
-            .ReadFromJsonAsync<GetFlagsResponse>(_jsonOptions, ct).ConfigureAwait(false);
+            .ReadFromJsonAsync(_json.GetFlagsResponse, ct).ConfigureAwait(false);
         // Applied here rather than at each store.Replace call site, so polling and the SSE
         // segment.updated refetch cannot drift; the sync frame parses its own payload and
         // drops there (#2402).
@@ -123,7 +134,7 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         var response = await _httpClient.GetAsync($"v1/sdk/flags/{Uri.EscapeDataString(key)}", ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var flag = await response.Content
-            .ReadFromJsonAsync<FlagConfiguration>(_jsonOptions, ct).ConfigureAwait(false);
+            .ReadFromJsonAsync(_json.FlagConfiguration, ct).ConfigureAwait(false);
         if (flag == null) return null;
 
         // An unevaluable enum drops the flag rather than upserting it (#2402). For a delta
@@ -146,7 +157,7 @@ internal sealed class FeatureFlagHttpClient : IDisposable
     {
         if (events.Count == 0) return;
         var request = new SendEventsRequest { Events = events };
-        var response = await _httpClient.PostAsJsonAsync("v1/sdk/events", request, _jsonOptions, ct).ConfigureAwait(false);
+        var response = await _httpClient.PostAsJsonAsync("v1/sdk/events", request, _json.SendEventsRequest, ct).ConfigureAwait(false);
         // Not EnsureSuccessStatusCode: the flush path has to know WHICH status came back so
         // it can keep the batch on a retryable failure instead of discarding it (#2456), and
         // HttpRequestException.StatusCode is unavailable on netstandard2.0.
@@ -174,10 +185,5 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         _disposed = true;
         _httpClient.Dispose();
         _streamingClient.Dispose();
-    }
-
-    private sealed class SendEventsRequest
-    {
-        public IReadOnlyList<SdkEvent> Events { get; set; } = Array.Empty<SdkEvent>();
     }
 }

@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using Featureflip.Client.Internal.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -13,10 +15,34 @@ namespace Featureflip.Client.Internal;
 /// </summary>
 internal sealed class SharedFeatureflipCore : IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    /// <summary>
+    /// Options for converting a served variation value to a caller-chosen <c>T</c>.
+    /// </summary>
+    /// <remarks>
+    /// The source-generated context covers the SDK's own types and the JSON DOM, which is
+    /// all a reflection-free app (NativeAOT, trimming, file-based apps) can use (#4301).
+    /// A caller's own POCO can only come from the reflection resolver, so that is chained
+    /// in behind the context — and only when reflection is actually enabled, because
+    /// constructing it in a reflection-free app is exactly the call that cannot work there.
+    /// </remarks>
+    private static readonly JsonSerializerOptions JsonOptions = CreateValueOptions();
+
+    private static JsonSerializerOptions CreateValueOptions()
     {
-        PropertyNameCaseInsensitive = true
-    };
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        options.TypeInfoResolver = JsonSerializer.IsReflectionEnabledByDefault
+            ? JsonTypeInfoResolver.Combine(FeatureflipJsonContext.Default, CreateReflectionResolver())
+            : FeatureflipJsonContext.Default;
+        return options;
+    }
+
+#if NET5_0_OR_GREATER
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "Reached only when JsonSerializer.IsReflectionEnabledByDefault is true, i.e. the app opted into reflection-based JSON. A trimmed or AOT app has it false and never constructs this.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "Reached only when JsonSerializer.IsReflectionEnabledByDefault is true, i.e. the app opted into reflection-based JSON. A trimmed or AOT app has it false and never constructs this.")]
+#endif
+    private static IJsonTypeInfoResolver CreateReflectionResolver() => new DefaultJsonTypeInfoResolver();
 
     // SSE reconnect backoff (mirrors go/python: 3s base, 30s cap). Applied on
     // every reconnect — including a clean/immediate EOF — so a persistently
@@ -597,6 +623,11 @@ internal sealed class SharedFeatureflipCore : IDisposable
             FlagKey = key,
             UserId = context?.UserId,
             Variation = detail.VariationKey,
+            Reason = WireReason(detail.Reason),
+            // A rule id rides along only for a genuine rule match; an Error read can still
+            // carry one in the detail (type mismatch / malformed variation) and must not.
+            RuleId = detail.Reason == EvaluationReason.RuleMatch ? detail.RuleId : null,
+            PrerequisiteKey = detail.Reason == EvaluationReason.PrerequisiteFailed ? detail.PrerequisiteKey : null,
             Timestamp = DateTime.UtcNow
         };
 
@@ -611,6 +642,16 @@ internal sealed class SharedFeatureflipCore : IDisposable
             _ = AutoFlushAsync();
         }
     }
+
+    private static string WireReason(EvaluationReason reason) => reason switch
+    {
+        EvaluationReason.RuleMatch => "rule-match",
+        EvaluationReason.Fallthrough => "fallthrough",
+        EvaluationReason.FlagDisabled => "flag-disabled",
+        EvaluationReason.PrerequisiteFailed => "prerequisite-failed",
+        EvaluationReason.FlagNotFound => "flag-not-found",
+        _ => "error"
+    };
 
     /// <summary>
     /// Runs a batch-size-triggered flush and releases the in-flight latch afterwards.
@@ -819,11 +860,29 @@ internal sealed class SharedFeatureflipCore : IDisposable
             return (T)(object)element.GetInt32();
         if (typeof(T) == typeof(double))
             return (T)(object)element.GetDouble();
+        if (typeof(T) == typeof(JsonElement))
+            return (T)(object)element.Clone();
+
+        // A caller-chosen T outside the generated context has no metadata when reflection
+        // is disabled. That throws, as a type mismatch does, so the read takes Evaluate's
+        // catch: the caller's default with EvaluationReason.Error and a logged error, never
+        // a crash (#4301). Checked up front rather than left to System.Text.Json so the
+        // message says what to do, where STJ's names a resolver the caller never configured.
+        if (!JsonOptions.TryGetTypeInfo(typeof(T), out var resolved) || resolved is not JsonTypeInfo<T> typeInfo)
+        {
+            throw new NotSupportedException(
+                $"Cannot convert the flag value to {typeof(T).FullName}: reflection-based JSON "
+                + "serialization is disabled in this app (NativeAOT, trimming, or a file-based "
+                + "app), so only bool, string, int, double, long, float, decimal, JsonElement, "
+                + "JsonDocument and JsonNode values can be read. Read the flag as JsonElement and "
+                + "convert it with your own source-generated JsonSerializerContext.");
+        }
+
 #if NETSTANDARD2_0
-        return JsonSerializer.Deserialize<T>(element.GetRawText(), JsonOptions)
+        return JsonSerializer.Deserialize(element.GetRawText(), typeInfo)
             ?? throw new InvalidOperationException($"Value is not convertible to {typeof(T).Name}.");
 #else
-        return element.Deserialize<T>(JsonOptions)
+        return element.Deserialize(typeInfo)
             ?? throw new InvalidOperationException($"Value is not convertible to {typeof(T).Name}.");
 #endif
     }
@@ -871,12 +930,66 @@ internal sealed class SharedFeatureflipCore : IDisposable
             _initializationTcs.TrySetResult(true);
             _logger.LogDebug("Feature flag client initialized successfully (async)");
         }
+        catch (Exception ex) when (!ct.IsCancellationRequested && IsPermanentInitFailure(ex))
+        {
+            // A failure that will recur on every retry must not leave the wait pending
+            // forever (#4301). Resolve it the way the synchronous path resolves any failure:
+            // offline when the caller opted into that, otherwise a faulted wait. The refresh
+            // loop still runs either way.
+            _logger.LogError(ex, "Background initialization failed with an error that retrying cannot fix");
+            if (_options.StartOffline)
+            {
+                _initializationTcs.TrySetResult(false);
+                return;
+            }
+
+            // Observed here so a caller that never awaits the wait does not get an
+            // UnobservedTaskException for it.
+            _ = _initializationTcs.Task.ContinueWith(
+                static t => _ = t.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            _initializationTcs.TrySetException(
+                new FeatureFlagInitializationException("Failed to initialize feature flag client.", ex));
+        }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Background initialization failed, will retry during refresh");
             // Don't set TCS here - let SSE/polling set it when they succeed
         }
     }
+
+    /// <summary>
+    /// Whether an initial-load failure would fail identically on every retry, so leaving
+    /// <see cref="WaitForInitializationAsync"/> pending for a refresh to resolve would leave
+    /// it pending forever.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The motivating case is System.Text.Json refusing to (de)serialize: a type with no
+    /// metadata in an app where reflection-based serialization is disabled throws
+    /// <see cref="InvalidOperationException"/> or <see cref="NotSupportedException"/>, and
+    /// every poll then fails the same way. Before #4301 that was every flag fetch in a
+    /// NativeAOT, trimmed or file-based app, and the wait never completed. The SDK's own
+    /// types are source-generated now, so this is the backstop for whatever still cannot
+    /// work, not the expected path.
+    /// </para>
+    /// <para>
+    /// Deliberately narrow: transport faults (<see cref="HttpRequestException"/>,
+    /// <see cref="IOException"/>), timeouts and a malformed payload
+    /// (<see cref="JsonException"/>) are none of these types and keep retrying as before.
+    /// <see cref="ObjectDisposedException"/> derives from InvalidOperationException but means
+    /// the client is shutting down, so it is excluded.
+    /// </para>
+    /// </remarks>
+    internal static bool IsPermanentInitFailure(Exception ex) => ex switch
+    {
+        ObjectDisposedException => false,
+        InvalidOperationException => true,
+        NotSupportedException => true,
+        _ => false
+    };
 
     private async Task LoadFlagsAsync(CancellationToken ct)
     {

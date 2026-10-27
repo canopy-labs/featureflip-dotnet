@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Featureflip.Client</RootNamespace>
     <PackageId>Featureflip.Client</PackageId>
-    <Version>2.11.0</Version>
+    <Version>2.12.0</Version>
     <Description>Feature flag client SDK for Featureflip</Description>
     <!-- NuGet renders no notes without this, so the package page said nothing about
          what changed in any version (#2553). Points at the PUBLIC mirror's Release:
@@ -14,6 +14,17 @@
          package. $(Version) is rewritten from the tag at publish time, and the mirror
          tags as plain v<version>, so this resolves to the right release. -->
     <PackageReleaseNotes>https://github.com/canopy-labs/featureflip-dotnet/releases/tag/v$(Version)</PackageReleaseNotes>
+  </PropertyGroup>
+
+  <!-- NativeAOT / trimming claim (#4301). IsAotCompatible implies IsTrimmable and turns on
+       the trim, AOT and single-file analyzers, which only exist for net8.0+. Every SDK-owned
+       (de)serialization goes through the source-generated FeatureflipJsonContext. The analyzer
+       warnings are errors here so the claim cannot quietly rot: a reflection-based
+       JsonSerializer call, or anything else AOT cannot honour, now fails the build instead of
+       failing silently in a customer's AOT app. -->
+  <PropertyGroup Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">
+    <IsAotCompatible>true</IsAotCompatible>
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2046;IL2057;IL2067;IL2070;IL2072;IL2075;IL2087;IL2091;IL2104;IL3050;IL3051;IL3053</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>

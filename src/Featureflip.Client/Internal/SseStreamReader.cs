@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Featureflip.Client.Internal.Models;
 using Microsoft.Extensions.Logging;
 
@@ -12,37 +11,42 @@ namespace Featureflip.Client.Internal;
 internal sealed class SseStreamReader : IDisposable
 {
     // Deserializer for the `sync` snapshot payload — same shape/options as the
-    // GET /v1/sdk/flags response (camelCase properties, string enums).
-    // internal (not private) so tests can assert against the SHIPPED configuration rather
-    // than a replica, which would keep passing if this registration regressed.
-    internal static readonly JsonSerializerOptions SnapshotJsonOptions = new()
+    // GET /v1/sdk/flags response (camelCase properties, string enums), bound to the
+    // source-generated context so the frame parses with reflection disabled (#4301).
+    private static readonly FeatureflipJsonContext SnapshotJson = new(new JsonSerializerOptions
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
-        // TolerantConditionOperatorConverter FIRST: System.Text.Json picks the first
-        // converter that handles a type, so it must precede the stock enum converter to
-        // win for ConditionOperator. It maps an unknown operator to a sentinel instead of
-        // throwing, which previously failed the WHOLE flags payload over one condition (#2372).
+        // An options-registered converter outranks the generated default, and these four
+        // claim every enum on the wire. Each maps an unknown NAME to a sentinel instead of
+        // throwing, which previously failed the WHOLE flags payload over one condition
+        // (#2372, #2402).
         //
-        // allowIntegerValues: false is the OTHER axis, and the two must not be confused.
-        // Left at its TRUE default, an integer resolved to a member by its UNDERLYING
-        // VALUE — ordinal, for these declarations — so a value inserted mid-enum
-        // server-side would silently shift every later value here to the wrong one: no
-        // exception, no log, wrong targeting. Java closed the identical hazard with
-        // FAIL_ON_NUMBERS_FOR_ENUMS (#2283); C# was the mirror-image case (#2315). #2279
-        // is the server bug that made integer enums reach SDKs at all.
+        // Each also rejects an INTEGER, which is the OTHER axis, and the two must not be
+        // confused. An integer resolved to a member by its UNDERLYING VALUE — ordinal, for
+        // these declarations — so a value inserted mid-enum server-side would silently
+        // shift every later value here to the wrong one: no exception, no log, wrong
+        // targeting. Java closed the identical hazard with FAIL_ON_NUMBERS_FOR_ENUMS
+        // (#2283); C# was the mirror-image case (#2315). #2279 is the server bug that made
+        // integer enums reach SDKs at all.
         //
         // So: an unknown enum STRING is tolerated (forward compatibility, #2372); an
         // integer is a TYPE violation and is rejected.
+        //
+        // No stock JsonStringEnumConverter after them: it was unreachable, and its
+        // non-generic form needs runtime code generation NativeAOT lacks (#4301).
         Converters =
         {
             new TolerantConditionOperatorConverter(),
             new TolerantFlagTypeConverter(),
             new TolerantServeTypeConverter(),
-            new TolerantConditionLogicConverter(),
-            new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false)
+            new TolerantConditionLogicConverter()
         }
-    };
+    });
+
+    // internal (not private) so tests can assert against the SHIPPED configuration rather
+    // than a replica, which would keep passing if this registration regressed.
+    internal static JsonSerializerOptions SnapshotJsonOptions => SnapshotJson.Options;
 
     private readonly Stream _stream;
     private readonly ILogger _logger;
@@ -170,7 +174,7 @@ internal sealed class SseStreamReader : IDisposable
         // Full config snapshot the server sends on (re)connect. Carried whole so
         // the core can apply it as a store REPLACE (drop flags absent from it),
         // re-syncing anything changed/deleted during a disconnect.
-        var snapshot = JsonSerializer.Deserialize<GetFlagsResponse>(data, SnapshotJsonOptions);
+        var snapshot = JsonSerializer.Deserialize(data, SnapshotJson.GetFlagsResponse);
         // The sync frame is parsed here rather than through GetFlagsAsync, so the
         // entity-drop has to be applied explicitly — letting the two transports diverge on
         // the same payload shape is its own bug class (#2279).

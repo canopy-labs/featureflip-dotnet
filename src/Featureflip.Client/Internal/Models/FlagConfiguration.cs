@@ -2,13 +2,13 @@ namespace Featureflip.Client.Internal.Models;
 
 internal sealed record FlagConfiguration
 {
-    public string Key { get; init; } = string.Empty;
-    public int Version { get; init; }
-    public FlagType Type { get; init; }
-    public bool Enabled { get; init; }
-    public List<Variation> Variations { get; init; } = new();
-    public List<TargetingRule> Rules { get; init; } = new();
-    public ServeConfig? Fallthrough { get; init; }
-    public string OffVariation { get; init; } = string.Empty;
-    public List<Prerequisite> Prerequisites { get; init; } = new();
+    public string Key { get; set; } = string.Empty;
+    public int Version { get; set; }
+    public FlagType Type { get; set; }
+    public bool Enabled { get; set; }
+    public List<Variation> Variations { get; set; } = new();
+    public List<TargetingRule> Rules { get; set; } = new();
+    public ServeConfig? Fallthrough { get; set; }
+    public string OffVariation { get; set; } = string.Empty;
+    public List<Prerequisite> Prerequisites { get; set; } = new();
 }

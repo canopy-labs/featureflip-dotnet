@@ -58,7 +58,13 @@ internal sealed class TolerantFlagTypeConverter : JsonConverter<FlagType>
     private static Dictionary<string, FlagType> BuildLookup()
     {
         var map = new Dictionary<string, FlagType>(StringComparer.OrdinalIgnoreCase);
+#if NET5_0_OR_GREATER
+        // The generic overload: Enum.GetValues(Type) needs runtime code generation, which
+        // NativeAOT does not have (#4301).
+        foreach (var value in Enum.GetValues<FlagType>())
+#else
         foreach (FlagType value in (FlagType[])Enum.GetValues(typeof(FlagType)))
+#endif
         {
             map[value.ToString()] = value;
         }

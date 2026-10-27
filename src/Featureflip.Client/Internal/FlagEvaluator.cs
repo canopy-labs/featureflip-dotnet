@@ -301,11 +301,12 @@ internal sealed class FlagEvaluator
         // Issue #2262: an unrecognised operator fails CLOSED. Inverting it with
         // Negate would turn "I cannot evaluate this" into "matches every user",
         // serving the flag to 100% of traffic. Every ConditionOperator member is
-        // covered by EvaluateOperator, and FeatureFlagHttpClient's
-        // JsonStringEnumConverter rejects an unknown operator before it reaches
-        // here, so this is defensive — it holds the invariant if a member is
-        // added without a matching case, and keeps this SDK's contract identical
-        // to the string-typed SDKs (js/go/ruby/php) where the input IS reachable.
+        // covered by EvaluateOperator, but an operator name this build does not
+        // know arrives as TolerantConditionOperatorConverter.Unrecognized (#2372),
+        // so this path is live for any operator added server-side after this
+        // release. It also holds the invariant if a member is added without a
+        // matching case, and keeps this SDK's contract identical to the
+        // string-typed SDKs (js/go/ruby/php).
         if (result is null)
         {
             return false;
@@ -355,9 +356,10 @@ internal sealed class FlagEvaluator
         System.Text.Json.JsonElement je => FormatJsonElementForBucket(je),
         double d => CanonicalNumber.Format(d),
         float f => CanonicalNumber.Format(f),
-        // An integral decimal keeps its exact integer digits (like the engine's raw integer
-        // text); anything else goes through double.
-        decimal m => m == decimal.Truncate(m)
+        // An integral decimal below 1e21 keeps its exact integer digits (like the engine's raw
+        // integer text); anything else goes through double. decimal tops out near 7.9e28, so
+        // the cap is for parity with the SDKs whose unbounded decimals need it (#4246).
+        decimal m => m == decimal.Truncate(m) && Math.Abs(m) < 1E+21m
             ? (m == 0m ? "0" : decimal.Truncate(m).ToString("0", System.Globalization.CultureInfo.InvariantCulture))
             : CanonicalNumber.Format((double)m),
         _ => ConvertToString(value)

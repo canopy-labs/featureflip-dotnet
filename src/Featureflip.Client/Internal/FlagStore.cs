@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Featureflip.Client.Internal.Models;
 
 namespace Featureflip.Client.Internal;
@@ -313,7 +314,7 @@ internal sealed class FlagStore
 
         foreach (var entry in nextFlags)
         {
-            if (!current.Flags.TryGetValue(entry.Key, out var previous) || Differs(previous, entry.Value))
+            if (!current.Flags.TryGetValue(entry.Key, out var previous) || Differs(previous, entry.Value, ComparisonJson.FlagConfiguration))
             {
                 (changed ??= new HashSet<string>(StringComparer.Ordinal)).Add(entry.Key);
             }
@@ -331,7 +332,7 @@ internal sealed class FlagStore
 
         foreach (var entry in nextSegments)
         {
-            if (!current.Segments.TryGetValue(entry.Key, out var previous) || Differs(previous, entry.Value))
+            if (!current.Segments.TryGetValue(entry.Key, out var previous) || Differs(previous, entry.Value, ComparisonJson.Segment))
             {
                 (changedSegments ??= new HashSet<string>(StringComparer.Ordinal)).Add(entry.Key);
             }
@@ -400,17 +401,19 @@ internal sealed class FlagStore
     /// the rare case — while the common one still has to be compared.
     /// </para>
     /// </remarks>
-    private static bool Differs<T>(T previous, T next)
-        => !JsonSerializer.SerializeToUtf8Bytes(previous, ComparisonOptions).AsSpan()
-            .SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(next, ComparisonOptions));
+    private static bool Differs<T>(T previous, T next, JsonTypeInfo<T> typeInfo)
+        => !JsonSerializer.SerializeToUtf8Bytes(previous, typeInfo).AsSpan()
+            .SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(next, typeInfo));
 
     /// <summary>
-    /// Serializer options for <see cref="Differs{T}"/> only — never for wire traffic.
+    /// Serializer metadata for <see cref="Differs{T}"/> only — never for wire traffic.
+    /// Source-generated, like every other SDK-owned serialization, so change detection
+    /// does not throw (and so freeze the store) where reflection is disabled (#4301).
     /// </summary>
-    private static readonly JsonSerializerOptions ComparisonOptions = new()
+    private static readonly FeatureflipJsonContext ComparisonJson = new(new JsonSerializerOptions
     {
         Converters = { new UndefinedTolerantJsonElementConverter() }
-    };
+    });
 
     /// <summary>
     /// Writes an <see cref="JsonValueKind.Undefined"/> element as JSON null instead of

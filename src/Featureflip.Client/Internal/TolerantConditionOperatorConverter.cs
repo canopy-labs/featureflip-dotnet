@@ -49,7 +49,13 @@ internal sealed class TolerantConditionOperatorConverter : JsonConverter<Conditi
     private static Dictionary<string, ConditionOperator> BuildLookup()
     {
         var map = new Dictionary<string, ConditionOperator>(StringComparer.OrdinalIgnoreCase);
+#if NET5_0_OR_GREATER
+        // The generic overload: Enum.GetValues(Type) needs runtime code generation, which
+        // NativeAOT does not have (#4301).
+        foreach (var value in Enum.GetValues<ConditionOperator>())
+#else
         foreach (ConditionOperator value in (ConditionOperator[])Enum.GetValues(typeof(ConditionOperator)))
+#endif
         {
             map[value.ToString()] = value;
         }

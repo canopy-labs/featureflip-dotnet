@@ -5,6 +5,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Featureflip.Client.Extensions.DependencyInjection.Tests/Featureflip.Client.Extensions.DependencyInjection.Tests.csproj" />
+    <Project Path="tests/Featureflip.Client.ReflectionFreeTests/Featureflip.Client.ReflectionFreeTests.csproj" />
     <Project Path="tests/Featureflip.Client.Tests/Featureflip.Client.Tests.csproj" />
   </Folder>
 </Solution>

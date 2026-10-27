@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.12.0 — 2026-10-26
+
+### Added
+
+- Evaluation analytics events now carry the evaluation `reason` (`rule-match`, `fallthrough`, `flag-disabled`, `prerequisite-failed`, `error` or `flag-not-found`) and, for a rule match, the matched `ruleId`, so the dashboard can show where flag traffic came from. A prerequisite failure also carries `prerequisiteKey`. Absent fields are omitted from the event instead of being sent as null. The public `EvaluationDetail` API is unchanged. (#4268)
+
+### Fixed
+
+- An integral `decimal` rollout bucket value of 1e21 or more now hashes in the canonical number spelling (for example `1e+21`) instead of its full integer digits, matching the other SDKs, which need the cap because their decimals have no upper bound. A context bucketed on such a value may get a different variant. (#4246)
+- The SDK now works in apps where reflection-based `System.Text.Json` is disabled: NativeAOT, trimmed apps, and .NET 10 file-based apps (`dotnet run app.cs`). Previously every flag fetch and event post failed there, so every flag served its default, every event was dropped, and `WaitForInitializationAsync()` never completed. The SDK now uses source-generated serialization and is marked AOT-compatible and trimmable for `net8.0` and `net10.0`. In such an app, `Variation<T>`/`JsonVariation<T>` can read `bool`, `string`, `int`, `long`, `float`, `double`, `decimal`, `JsonElement`, `JsonDocument` and `JsonNode`. Asking for your own class there returns your default with reason `Error`, so read the flag as `JsonElement` and convert it with your own source-generated context. Separately, if the background initial load fails with an error that retrying can't fix, `WaitForInitializationAsync()` now throws `FeatureFlagInitializationException` instead of waiting forever, or completes as offline when `StartOffline` is set. Network errors and server errors still retry as before. (#4301)
+
 ## 2.11.0 — 2026-10-22
 
 ### Changed

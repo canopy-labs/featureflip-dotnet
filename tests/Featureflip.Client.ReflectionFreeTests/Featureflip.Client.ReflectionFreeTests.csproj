@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Runs the SHIPPED client with reflection-based System.Text.Json switched off, the state a
+    NativeAOT app, a trimmed app or a .NET 10 file-based app (`dotnet run app.cs`) is in (#4301).
+    Its own project because the switch is process-wide: set in Featureflip.Client.Tests it would
+    break every test there that serializes a test-local type by reflection.
+
+    Public API only, no InternalsVisibleTo, so what passes here is what a customer's app gets.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Featureflip.Client\Featureflip.Client.csproj" />
+  </ItemGroup>
+</Project>

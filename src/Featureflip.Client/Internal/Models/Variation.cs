@@ -4,6 +4,6 @@ namespace Featureflip.Client.Internal.Models;
 
 internal sealed record Variation
 {
-    public string Key { get; init; } = string.Empty;
-    public JsonElement Value { get; init; }
+    public string Key { get; set; } = string.Empty;
+    public JsonElement Value { get; set; }
 }

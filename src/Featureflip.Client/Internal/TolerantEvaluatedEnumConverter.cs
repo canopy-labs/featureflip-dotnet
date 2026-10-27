@@ -60,7 +60,13 @@ internal abstract class TolerantEvaluatedEnumConverter<TEnum> : JsonConverter<TE
     private static Dictionary<string, TEnum> BuildLookup()
     {
         var map = new Dictionary<string, TEnum>(StringComparer.OrdinalIgnoreCase);
+#if NET5_0_OR_GREATER
+        // The generic overload: Enum.GetValues(Type) needs runtime code generation, which
+        // NativeAOT does not have (#4301).
+        foreach (var value in Enum.GetValues<TEnum>())
+#else
         foreach (TEnum value in (TEnum[])Enum.GetValues(typeof(TEnum)))
+#endif
         {
             map[value.ToString()!] = value;
         }

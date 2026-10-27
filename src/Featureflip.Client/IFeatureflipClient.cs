@@ -77,5 +77,14 @@ public interface IFeatureflipClient : IDisposable
     /// initialized. Honors <paramref name="cancellationToken"/> only while the
     /// load is still pending.
     /// </summary>
+    /// <remarks>
+    /// A transient failure (network, timeout, server error) leaves the task pending
+    /// while the client keeps retrying in the background. A failure that retrying
+    /// cannot fix faults it with <see cref="FeatureFlagInitializationException"/>
+    /// instead, or completes it as offline when <c>StartOffline</c> is set.
+    /// </remarks>
+    /// <exception cref="FeatureFlagInitializationException">
+    /// The initial load failed with an error that retrying cannot fix.
+    /// </exception>
     Task WaitForInitializationAsync(CancellationToken cancellationToken = default);
 }

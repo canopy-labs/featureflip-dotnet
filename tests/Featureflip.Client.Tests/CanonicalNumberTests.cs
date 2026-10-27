@@ -49,6 +49,12 @@ public class CanonicalNumberTests
             (1.0m, "1"), (100m, "100"), (1E+2m, "100"), (-5.00m, "-5"), (-0.0m, "0"),
             (12345678901234567890m, "12345678901234567890"),
             (2.50m, "2.5"), (0.1m, "0.1"),
+            // Exact digits stop below 1e21; at and above it the value goes through double (#4246),
+            // the same cap as the SDKs whose decimals have no upper bound.
+            (999999999999999999999m, "999999999999999999999"),
+            (-999999999999999999999m, "-999999999999999999999"),
+            (1E+21m, "1e+21"), (-1E+21m, "-1e+21"), (1000000000000000000000.000m, "1e+21"),
+            (decimal.MaxValue, "7.922816251426434e+28"),
         };
         foreach (var (value, text) in cases)
         {
