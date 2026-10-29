@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    NativeAOT publish smoke test (#4364): the third guard on the SDK's AOT/trim claim (#4301).
+    The analyzers in Featureflip.Client.csproj see only the SDK's own code, and
+    Featureflip.Client.ReflectionFreeTests runs on the JIT. Neither runs the ILCompiler, so
+    whole-app trim/AOT warnings (including ones from the SDK's dependencies), code the trimmer
+    removes, missing generic instantiations and JIT-vs-native differences only showed up in a
+    customer's PublishAot app. This one is published with the ILCompiler and then executed.
+
+    A plain executable, not a test project, so it is independent of the test framework, and
+    not in Featureflip.slnx, so the build-and-test job never builds it: CI publishes it in its
+    own job. Program.cs exits non-zero on any failure. How to run it locally is in
+    packages/CLAUDE.md.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <PublishAot>true</PublishAot>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IlcTreatWarningsAsErrors>true</IlcTreatWarningsAsErrors>
+    <!-- One warning per problem rather than a single IL2104 per offending assembly, so a red
+         run names the call site. -->
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Linked rather than copied, so there is one loopback stub for both runtime guards. -->
+    <Compile Include="..\Featureflip.Client.ReflectionFreeTests\StubFlagServer.cs" Link="StubFlagServer.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Featureflip.Client\Featureflip.Client.csproj" />
+  </ItemGroup>
+</Project>

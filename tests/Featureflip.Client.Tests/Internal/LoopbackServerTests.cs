@@ -60,6 +60,6 @@ public class LoopbackServerTests
         late.SetException(new InvalidOperationException("faulted after being abandoned"));
 
         // Faulting an already-abandoned task must not propagate anywhere observable.
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
     }
 }

@@ -29,7 +29,7 @@ public class EvaluationEventReasonTests
 
         var detail = client.VariationDetail("s", new EvaluationContext { UserId = "u1" }, false);
         Assert.Equal(EvaluationReason.Error, detail.Reason);
-        await client.FlushAsync();
+        await client.FlushAsync(TestContext.Current.CancellationToken);
 
         var evt = Assert.Single(server.CapturedEvents());
         Assert.Equal("error", evt.GetProperty("reason").GetString());

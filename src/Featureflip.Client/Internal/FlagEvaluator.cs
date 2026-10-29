@@ -398,10 +398,16 @@ internal sealed class FlagEvaluator
     {
         if (value == null) return string.Empty;
 
-        // Use InvariantCulture for consistent string conversion across locales
+        // Use InvariantCulture for consistent string conversion across locales.
+        // Booleans are JSON's lowercase "true"/"false", matching the Evaluation API and
+        // every other SDK; bool.ToString() would give "True"/"False", which a
+        // case-sensitive operator (MatchesRegex) can tell apart (#1501).
         return value switch
         {
             string s => s,
+            bool b => b ? "true" : "false",
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True } => "true",
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.False } => "false",
             IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
             _ => value.ToString() ?? string.Empty
         };

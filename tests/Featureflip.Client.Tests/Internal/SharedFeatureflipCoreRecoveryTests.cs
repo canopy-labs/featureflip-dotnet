@@ -102,7 +102,7 @@ public class SharedFeatureflipCoreRecoveryTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
@@ -178,7 +178,7 @@ public class SharedFeatureflipCoreRecoveryTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         var logger = new LevelCapturingLogger();
         try

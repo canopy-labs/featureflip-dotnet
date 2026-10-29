@@ -74,7 +74,7 @@ public class FeatureFlagHttpClientTests
             await resp.OutputStream.WriteAsync(body, 0, body.Length, testTimeout.Token);
             await resp.OutputStream.FlushAsync(testTimeout.Token);
             resp.Close();
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
@@ -144,14 +144,14 @@ public class FeatureFlagHttpClientTests
             catch (OperationCanceledException) { /* test finished */ }
             catch (HttpListenerException) { /* listener stopped */ }
             catch (ObjectDisposedException) { /* listener disposed */ }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
             var options = new FeatureFlagOptions { BaseUrl = baseUrl, ReadTimeout = readTimeout };
             using var client = new FeatureFlagHttpClient("sdk-key", options);
 
-            await Assert.ThrowsAsync<TaskCanceledException>(() => client.GetFlagsAsync());
+            await Assert.ThrowsAsync<TaskCanceledException>(() => client.GetFlagsAsync(TestContext.Current.CancellationToken));
         }
         finally
         {

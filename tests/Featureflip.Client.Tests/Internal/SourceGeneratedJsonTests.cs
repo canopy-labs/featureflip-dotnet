@@ -176,7 +176,7 @@ public class SourceGeneratedJsonTests
         using var core = new SharedFeatureflipCore("sdk-key", AsyncOptions(server.BaseUrl), NullLogger.Instance);
 
         var ex = await Assert.ThrowsAsync<FeatureFlagInitializationException>(
-            () => core.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            () => core.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         Assert.IsType<InvalidOperationException>(ex.InnerException);
         Assert.False(core.IsInitialized);
     }
@@ -189,7 +189,7 @@ public class SourceGeneratedJsonTests
         options.StartOffline = true;
         using var core = new SharedFeatureflipCore("sdk-key", options, NullLogger.Instance);
 
-        await core.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await core.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.False(core.IsInitialized);
     }
 
@@ -201,7 +201,7 @@ public class SourceGeneratedJsonTests
             : (200, "application/json", FlagsJson));
         using var core = new SharedFeatureflipCore("sdk-key", AsyncOptions(server.BaseUrl), NullLogger.Instance);
 
-        await core.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(20));
+        await core.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
         Assert.True(core.IsInitialized);
         Assert.True(core.Evaluate("f", new EvaluationContext { UserId = "u" }, false).Value);
     }

@@ -390,15 +390,15 @@ public class FlagStoreTests
                 store.Replace(
                     new List<FlagConfiguration> { CreateFlag("replace-flag") },
                     new List<Segment> { CreateSegment("replace-segment") });
-            });
+            }, TestContext.Current.CancellationToken);
 
             var upsertTask = Task.Run(() =>
             {
                 barrier.SignalAndWait();
                 store.Upsert(flags: new List<FlagConfiguration> { CreateFlag("upsert-flag") });
-            });
+            }, TestContext.Current.CancellationToken);
 
-            Task.WaitAll(replaceTask, upsertTask);
+            Task.WaitAll(new[] { replaceTask, upsertTask }, TestContext.Current.CancellationToken);
 
             // After both complete, at least the last writer's data must be present.
             // Without the lock, _snapshot could be overwritten by Replace after Upsert

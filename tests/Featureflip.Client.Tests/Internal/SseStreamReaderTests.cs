@@ -25,7 +25,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -41,7 +41,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -57,7 +57,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -72,7 +72,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -87,7 +87,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -101,7 +101,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Empty(events);
@@ -117,7 +117,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Empty(events);
@@ -131,7 +131,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         // The invalid event is skipped, the valid one is parsed
@@ -147,7 +147,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -165,7 +165,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Equal(4, events.Count);
@@ -183,7 +183,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -200,7 +200,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -225,7 +225,7 @@ public class SseStreamReaderTests
         using var reader = CreateReader(sse);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -241,7 +241,7 @@ public class SseStreamReaderTests
         // StreamReader.ReadLineAsync reassembles an oversized single `data:` line
         // across read boundaries and ParseSyncEvent deserializes the full snapshot.
         var fixture = (await File.ReadAllTextAsync(
-            Path.Combine(AppContext.BaseDirectory, "golden", "snapshot.json"))).Trim();
+            Path.Combine(AppContext.BaseDirectory, "golden", "snapshot.json"), TestContext.Current.CancellationToken)).Trim();
         Assert.True(System.Text.Encoding.UTF8.GetByteCount(fixture) > 64 * 1024,
             "snapshot.json fixture must exceed 64 KiB");
 
@@ -250,7 +250,7 @@ public class SseStreamReaderTests
         using var reader = new SseStreamReader(new ChunkedStream(bytes, 64), NullLogger.Instance);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Single(events);
@@ -275,7 +275,7 @@ public class SseStreamReaderTests
         using var reader = new SseStreamReader(new SeveringStream(), logger);
 
         var events = new List<SseEvent>();
-        await foreach (var e in reader.ReadEventsAsync())
+        await foreach (var e in reader.ReadEventsAsync(TestContext.Current.CancellationToken))
             events.Add(e);
 
         Assert.Empty(events);

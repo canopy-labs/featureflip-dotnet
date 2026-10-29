@@ -17,6 +17,10 @@ namespace Featureflip.Client.ReflectionFreeTests;
 /// it, and never join the loop without a bound — because a pending
 /// <see cref="HttpListener.GetContextAsync"/> once kept a test host alive until the CI job's
 /// 6-hour limit.
+/// <para>
+/// Also compiled into <c>Featureflip.Client.AotSmoke</c> (linked, #4364), which publishes it
+/// with NativeAOT and fails on any trim/AOT warning, so keep it reflection-free.
+/// </para>
 /// </remarks>
 internal sealed class StubFlagServer : IAsyncDisposable
 {

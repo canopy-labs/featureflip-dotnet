@@ -6,6 +6,11 @@
     break every test there that serializes a test-local type by reflection.
 
     Public API only, no InternalsVisibleTo, so what passes here is what a customer's app gets.
+
+    Under xunit.v3 the runner and Microsoft.Testing.Platform live in this same process, so the
+    switch applies to them too (#4356). They run with it off; if a runner upgrade ever needs it
+    on, move this project back to a separate-host runner rather than turning the switch on.
+    ReflectionBasedSerializationIsDisabledInThisProcess fails if the switch doesn't take effect.
   -->
   <PropertyGroup>
     <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
@@ -18,8 +23,11 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
   </ItemGroup>
 
   <ItemGroup>

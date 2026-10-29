@@ -59,7 +59,7 @@ public class GoldenEventPayloadTests
         }
 
         client.BoolVariation(vector.GetProperty("flagKey").GetString()!, ctx, false);
-        await client.FlushAsync();
+        await client.FlushAsync(TestContext.Current.CancellationToken);
 
         var events = server.CapturedEvents();
         var evt = Assert.Single(events);

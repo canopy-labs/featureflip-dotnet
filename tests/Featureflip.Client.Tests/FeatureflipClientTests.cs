@@ -340,7 +340,7 @@ public class FeatureflipClientTests
         var client = CreateTestClient(new List<FlagConfiguration>());
 
         // Should not throw
-        await client.FlushAsync();
+        await client.FlushAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -353,8 +353,8 @@ public class FeatureflipClientTests
         var tasks = new List<Task>();
         for (var i = 0; i < 10; i++)
         {
-            tasks.Add(Task.Run(() => client.Dispose()));
-            tasks.Add(Task.Run(() => client.Flush()));
+            tasks.Add(Task.Run(() => client.Dispose(), TestContext.Current.CancellationToken));
+            tasks.Add(Task.Run(() => client.Flush(), TestContext.Current.CancellationToken));
             tasks.Add(Task.Run(() => client.BoolVariation("flag", context, false)));
         }
 
@@ -481,7 +481,7 @@ public class FeatureflipClientTests
         var store = new FlagStore();
         using var client = new FeatureflipClient(store, new FlagEvaluator(), new FeatureFlagOptions());
 
-        await client.WaitForInitializationAsync();
+        await client.WaitForInitializationAsync(TestContext.Current.CancellationToken);
 
         Assert.True(client.IsInitialized);
     }

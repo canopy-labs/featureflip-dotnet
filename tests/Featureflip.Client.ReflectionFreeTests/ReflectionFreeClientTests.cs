@@ -55,7 +55,7 @@ public class ReflectionFreeClientTests
         await using var server = new StubFlagServer(PolledFlags);
         using var client = server.CreateClient(streaming: false);
 
-        await client.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await client.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.True(client.IsInitialized);
 
         var ctx = new EvaluationContext { UserId = "user-1" }.Set("plan", "pro");
@@ -83,7 +83,7 @@ public class ReflectionFreeClientTests
     {
         await using var server = new StubFlagServer(PolledFlags);
         using var client = server.CreateClient(streaming: false);
-        await client.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await client.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         var fallback = new Shape { Color = "fallback" };
         var detail = client.VariationDetail("json-flag", new EvaluationContext { UserId = "u" }, fallback);
@@ -100,7 +100,7 @@ public class ReflectionFreeClientTests
     {
         await using var server = new StubFlagServer(PolledFlags);
         using var client = server.CreateClient(streaming: false);
-        await client.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await client.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         var ctx = new EvaluationContext { UserId = "user-1" }.Set("plan", "pro");
         Assert.True(client.BoolVariation("bool-flag", ctx, false));
@@ -133,13 +133,13 @@ public class ReflectionFreeClientTests
 
         await using var server = new StubFlagServer(polled, syncSnapshot: snapshot);
         using var client = server.CreateClient(streaming: true);
-        await client.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await client.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         var ctx = new EvaluationContext { UserId = "user-1" };
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
         while (DateTime.UtcNow < deadline && !client.BoolVariation("sse-flag", ctx, false))
         {
-            await Task.Delay(50);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
         }
 
         var detail = client.VariationDetail("sse-flag", ctx, false);

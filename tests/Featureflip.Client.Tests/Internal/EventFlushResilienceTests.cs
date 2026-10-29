@@ -113,7 +113,7 @@ public class EventFlushResilienceTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
@@ -173,7 +173,7 @@ public class EventFlushResilienceTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
@@ -231,7 +231,7 @@ public class EventFlushResilienceTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
@@ -303,7 +303,7 @@ public class EventFlushResilienceTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
@@ -375,7 +375,7 @@ public class EventFlushResilienceTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {

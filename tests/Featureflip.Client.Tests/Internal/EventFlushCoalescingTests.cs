@@ -120,7 +120,7 @@ public class EventFlushCoalescingTests
                     ctx.Response.Close();
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
@@ -130,7 +130,7 @@ public class EventFlushCoalescingTests
             var first = core.FlushAsync(testTimeout.Token);
             // The first request is parked in the handler, so the drain loop is provably
             // mid-flight and anything arriving next came from a second one.
-            await firstArrived.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await firstArrived.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             var released = 0;
             var second = Task.Run(async () =>
@@ -141,13 +141,13 @@ public class EventFlushCoalescingTests
 
             // Room for the second caller to misbehave: uncoalesced it drains a batch and
             // posts it, which the peak counter catches.
-            await Task.Delay(TimeSpan.FromMilliseconds(200));
+            await Task.Delay(TimeSpan.FromMilliseconds(200), TestContext.Current.CancellationToken);
 
             Volatile.Write(ref released, 1);
             gate.TrySetResult(true);
 
-            var secondSawRelease = await second.WaitAsync(TimeSpan.FromSeconds(10));
-            await first.WaitAsync(TimeSpan.FromSeconds(10));
+            var secondSawRelease = await second.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await first.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             Assert.Equal(1, Volatile.Read(ref peak));
             // A caller that awaited FlushAsync is asking for its events to be sent, so it
