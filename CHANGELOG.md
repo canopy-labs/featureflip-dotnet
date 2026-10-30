@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.13.0 — 2026-10-30
+
+### Fixed
+
+- A rollout whose Bucket by value is a collection (an array, list or dictionary, or a JSON array or object, empty or not) can't be bucketed, so the rule is skipped like one with no value. It used to hash `ToString()`, which put the context in a different bucket than the evaluation engine and the other SDKs. (#4572)
+
+### Changed
+
+- Built-in attribute names are now matched exactly, like the evaluation engine and every other SDK. `GetAttribute`, targeting rules and a rollout's Bucket by read `UserId` only as `userId` or `user_id`, `Email` only as `email` and `Country` only as `country`. Any other casing, such as `UserId`, `USER_ID` or `Email`, is now an ordinary custom attribute, so it is missing unless set under that exact key: a condition on it no longer matches the built-in value, and a rollout bucketed by it skips the rule. Rules that used such a spelling served differently in this SDK than server-side evaluation and the other SDKs; rename the attribute in the rule to `user_id`, `email` or `country` to keep reading the built-in. (#4609)
+- A rollout with no Bucket by now defaults to `user_id`, the canonical user-identifier spelling, instead of `userId`. The built-in `UserId` still resolves for both spellings. A context with no typed user id whose attribute bag carries the identifier under `userId` is no longer bucketed by a rollout that names no Bucket by; set the typed user id or use `user_id`. (#4518)
+
 ## 2.12.1 — 2026-10-28
 
 ### Fixed

@@ -178,10 +178,44 @@ public class GoldenVectorTests
         Assert.Equal(v.GetProperty("expectedMatch").GetBoolean(), result.VariationKey == "match");
     }
 
+    // An array or object becomes the CLR collection a caller would pass (#4572).
+    private static object? ToClr(JsonElement e) => e.ValueKind switch
+    {
+        JsonValueKind.Number => e.GetDouble(),
+        JsonValueKind.True or JsonValueKind.False => e.GetBoolean(),
+        JsonValueKind.Array => e.EnumerateArray().Select(ToClr).ToList(),
+        JsonValueKind.Object => e.EnumerateObject().ToDictionary(p => p.Name, p => ToClr(p.Value)),
+        _ => e.GetString(),
+    };
+
     // ── Flag vectors ───────────────────────────────────────────────────────────
 
+    // csharp takes a typed context, so it skips mapContext: the spelling a caller used for the
+    // identity is not observable, and mapping user_id ?? userId into UserId here would test the
+    // runner's own mapping. It runs exactCaseIdentity: the built-in names are matched exactly,
+    // like the engine, so a condition or Bucket by on "UserId" reads an ordinary attribute (#4609).
+    private static readonly HashSet<string> SupportedCapabilities = new() { "exactCaseIdentity" };
+
+    private static bool Skipped(JsonElement v) =>
+        v.TryGetProperty("requires", out var req)
+        && req.EnumerateArray().Any(t => !SupportedCapabilities.Contains(t.GetString()!));
+
     public static IEnumerable<object[]> Flags() =>
-        Vectors.GetProperty("flagVectors").EnumerateArray().Select(v => new object[] { v });
+        Vectors.GetProperty("flagVectors").EnumerateArray()
+            .Where(v => !Skipped(v))
+            .Select(v => new object[] { v });
+
+    [Fact]
+    public void FlagVectorsExecutedAndSkippedCounts()
+    {
+        var all = Vectors.GetProperty("flagVectors").EnumerateArray().ToList();
+        var skipped = all.Count(Skipped);
+        // Only the 11 wireContext (mapContext) vectors; a silent skip-everything must not pass.
+        Assert.Equal(11, skipped);
+        Assert.Contains(Flags(), f => ((JsonElement)f[0]).GetProperty("id").GetString() == "f-identity-casing-bucket-UserId");
+        Assert.True(Flags().Count() >= 58, $"executed {Flags().Count()} flag vectors");
+        Assert.Equal(all.Count, Flags().Count() + skipped);
+    }
 
     [Theory]
     [MemberData(nameof(Flags))]
@@ -209,13 +243,7 @@ public class GoldenVectorTests
                 // numeric coercion (#1458) matches boxed CLR numerics, NOT JsonElement, so
                 // passing a JsonElement would bypass coercion for a numeric attribute.
                 // Mirror the condition-vector path above.
-                object value = a.Value.ValueKind switch
-                {
-                    JsonValueKind.Number => a.Value.GetDouble(),
-                    JsonValueKind.True or JsonValueKind.False => a.Value.GetBoolean(),
-                    _ => a.Value.GetString()!,
-                };
-                ctx.Set(a.Name, value);
+                ctx.Set(a.Name, ToClr(a.Value)!);
             }
         }
 

@@ -347,11 +347,13 @@ internal sealed class FlagEvaluator
     /// <summary>
     /// Bucket-path spelling: floating types use the canonical number spelling shared with the
     /// Evaluation API (#4236); booleans are JSON's "true"/"false" (not bool.ToString()'s
-    /// "True"/"False"); everything else (integers, strings) is unchanged.
-    /// Conditions keep <see cref="ConvertToString"/>.
+    /// "True"/"False"); everything else (integers, strings) is unchanged. A collection (array,
+    /// list, dictionary, or a JSON array/object) is "", the can't-bucket value, so the rollout is
+    /// skipped as for a missing attribute (#4572). Conditions keep <see cref="ConvertToString"/>.
     /// </summary>
     private static string ConvertToBucketString(object? value) => value switch
     {
+        string s => s,
         bool b => b ? "true" : "false",
         System.Text.Json.JsonElement je => FormatJsonElementForBucket(je),
         double d => CanonicalNumber.Format(d),
@@ -362,6 +364,7 @@ internal sealed class FlagEvaluator
         decimal m => m == decimal.Truncate(m) && Math.Abs(m) < 1E+21m
             ? (m == 0m ? "0" : decimal.Truncate(m).ToString("0", System.Globalization.CultureInfo.InvariantCulture))
             : CanonicalNumber.Format((double)m),
+        System.Collections.IEnumerable => string.Empty,
         _ => ConvertToString(value)
     };
 
@@ -389,8 +392,10 @@ internal sealed class FlagEvaluator
                     return start == 1 && raw.Substring(1).Trim('0').Length == 0 ? "0" : raw;
                 }
                 return CanonicalNumber.Format(element.GetDouble());
+            case System.Text.Json.JsonValueKind.String:
+                return element.GetString() ?? string.Empty;
             default:
-                return element.ToString();
+                return string.Empty; // array or object: the rollout can't bucket (#4572)
         }
     }
 
@@ -753,7 +758,7 @@ internal sealed class FlagEvaluator
         }
 
         // Rollout
-        var bucketBy = serve.BucketBy ?? "userId";
+        var bucketBy = serve.BucketBy ?? "user_id";
         var bucketValue = ConvertToBucketString(context.GetAttribute(bucketBy));
 
         if (serve.Variations == null || serve.Variations.Count == 0)

@@ -1113,10 +1113,10 @@ public class FlagEvaluatorRolloutTests
     }
 
     [Fact]
-    public void Rollout_DefaultBucketBy_MatchesExplicitUserId()
+    public void Rollout_DefaultBucketBy_MatchesExplicitUser_id()
     {
         // Arrange - the default bucketBy (null) should behave identically
-        // to explicitly setting bucketBy to "userId"
+        // to explicitly setting bucketBy to "user_id" (#4518)
         var flagDefault = CreateRolloutFlag(
             variations: new List<WeightedVariation>
             {
@@ -1131,7 +1131,7 @@ public class FlagEvaluatorRolloutTests
                 new WeightedVariation { Key = "on", Weight = 50 },
                 new WeightedVariation { Key = "off", Weight = 50 }
             },
-            bucketBy: "userId"  // explicit camelCase
+            bucketBy: "user_id"  // explicit canonical spelling
         );
         var context = new EvaluationContext { UserId = "test-user-123" };
 
@@ -1139,8 +1139,30 @@ public class FlagEvaluatorRolloutTests
         var resultDefault = _evaluator.Evaluate(flagDefault, context);
         var resultExplicit = _evaluator.Evaluate(flagExplicit, context);
 
-        // Assert - default bucketBy should be "userId", same as explicit
+        // Assert - default bucketBy should be "user_id", same as explicit
         Assert.Equal(resultExplicit.VariationKey, resultDefault.VariationKey);
+    }
+
+    [Fact]
+    public void Rollout_DefaultBucketBy_IsUser_id_NotUserId()
+    {
+        // No typed UserId, so the built-in alias can't resolve; GetAttribute falls to the
+        // exact-key attribute bag. Only a default of "user_id" finds this attribute (#4518).
+        var flag = KeylessFlag("default-bucket-by", null, new List<TargetingRule>
+        {
+            AlwaysRule("r1", 1, new ServeConfig
+            {
+                Type = ServeType.Rollout,
+                Salt = "test-salt",
+                Variations = new List<WeightedVariation> { new WeightedVariation { Key = "on", Weight = 100 } }
+            })
+        });
+        var context = new EvaluationContext().Set("user_id", "x");
+
+        var result = _evaluator.Evaluate(flag, context);
+
+        Assert.Equal("on", result.VariationKey);
+        Assert.Equal("r1", result.RuleId);
     }
 
     private static ServeConfig RolloutServe(string? bucketBy = null) => new ServeConfig
@@ -1214,6 +1236,32 @@ public class FlagEvaluatorRolloutTests
         Assert.Equal("r2", result.RuleId);
     }
 
+    [Theory]
+    [InlineData("UserId")]
+    [InlineData("USER_ID")]
+    [InlineData("userid")]
+    public void Rollout_CaseVariantUserIdBucketBy_IsMissingAndSkipsRule(string bucketBy)
+    {
+        // Only "userId" and "user_id" resolve the built-in user id, as in the engine and every
+        // other SDK. Any other casing is an ordinary attribute, missing here, so the rollout
+        // can't bucket and the rule is skipped (#4609).
+        var flag = KeylessFlag("case-variant-bucket-by", null, new List<TargetingRule>
+        {
+            AlwaysRule("r1", 1, new ServeConfig
+            {
+                Type = ServeType.Rollout,
+                BucketBy = bucketBy,
+                Salt = "test-salt",
+                Variations = new List<WeightedVariation> { new WeightedVariation { Key = "on", Weight = 100 } }
+            })
+        });
+
+        var result = _evaluator.Evaluate(flag, new EvaluationContext { UserId = "u1" });
+
+        Assert.Equal("off", result.VariationKey);
+        Assert.Equal(EvaluationReason.Fallthrough, result.Reason);
+    }
+
     [Fact]
     public void Rollout_CustomBucketByMissing_WithUserIdPresent_ServesFallthrough()
     {
@@ -1226,6 +1274,36 @@ public class FlagEvaluatorRolloutTests
             bucketBy: "anonymous_id");
 
         var result = _evaluator.Evaluate(flag, new EvaluationContext { UserId = "user-1" });
+
+        Assert.Equal("off", result.VariationKey);
+        Assert.Equal(EvaluationReason.Fallthrough, result.Reason);
+    }
+
+    // #4572: a collection can't be bucketed, so the rollout is skipped like a missing value.
+    public static IEnumerable<object[]> NonScalarBucketValues() => new[]
+    {
+        new object[] { new[] { "a", "b" } },
+        new object[] { new List<object>() },
+        new object[] { new Dictionary<string, object> { ["id"] = "acme" } },
+        new object[] { System.Text.Json.JsonDocument.Parse("[\"a\"]").RootElement.Clone() },
+        new object[] { System.Text.Json.JsonDocument.Parse("{}").RootElement.Clone() },
+    };
+
+    [Theory]
+    [MemberData(nameof(NonScalarBucketValues))]
+    public void Rollout_NonScalarBucketValue_ServesFallthrough(object value)
+    {
+        var flag = CreateRolloutFlag(
+            new List<WeightedVariation>
+            {
+                new WeightedVariation { Key = "on", Weight = 99 },
+                new WeightedVariation { Key = "off", Weight = 1 }
+            },
+            bucketBy: "groups");
+        var context = new EvaluationContext { UserId = "user-1" };
+        context.Set("groups", value);
+
+        var result = _evaluator.Evaluate(flag, context);
 
         Assert.Equal("off", result.VariationKey);
         Assert.Equal(EvaluationReason.Fallthrough, result.Reason);
@@ -1267,7 +1345,7 @@ public class FlagEvaluatorRolloutTests
         Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, entry.Level);
         Assert.Contains("warn-once-flag", entry.Message);
         Assert.Contains("rule r1", entry.Message);
-        Assert.Contains("userId", entry.Message);
+        Assert.Contains("user_id", entry.Message);
         Assert.DoesNotContain("secret@example.com", entry.Message);
     }
 

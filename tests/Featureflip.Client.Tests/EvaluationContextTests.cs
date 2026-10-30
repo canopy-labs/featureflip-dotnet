@@ -29,8 +29,33 @@ public class EvaluationContextTests
         };
 
         Assert.Equal("user-123", context.GetAttribute("userId"));
-        Assert.Equal("user-123", context.GetAttribute("UserId")); // case-insensitive
+        Assert.Equal("user-123", context.GetAttribute("user_id"));
         Assert.Equal("alice@example.com", context.GetAttribute("email"));
+    }
+
+    [Theory]
+    [InlineData("UserId")]
+    [InlineData("USERID")]
+    [InlineData("userid")]
+    [InlineData("USER_ID")]
+    [InlineData("User_Id")]
+    [InlineData("Email")]
+    [InlineData("EMAIL")]
+    [InlineData("Country")]
+    [InlineData("COUNTRY")]
+    public void EvaluationContext_GetAttribute_MatchesBuiltInNamesExactly(string key)
+    {
+        // The built-in names are matched exactly, like the engine and every other SDK:
+        // any other casing is an ordinary attribute, missing unless set under that key (#4609).
+        var context = new EvaluationContext
+        {
+            UserId = "user-123",
+            Email = "alice@example.com",
+            Country = "US"
+        };
+
+        Assert.Null(context.GetAttribute(key));
+        Assert.Equal("custom", context.Set(key, "custom").GetAttribute(key));
     }
 
     [Fact]
@@ -44,6 +69,39 @@ public class EvaluationContextTests
         Assert.Equal("pro", context.GetAttribute("plan"));
         Assert.Equal(true, context.GetAttribute("beta_tester"));
         Assert.Equal(25, context.GetAttribute("age"));
+    }
+
+    [Fact]
+    public void EvaluationContext_GetAttribute_MatchesCustomAttributeKeysExactly()
+    {
+        // Exact key match, like the engine and every other SDK (#4527).
+        var context = new EvaluationContext { UserId = "user-123" }
+            .Set("Plan", "pro");
+
+        Assert.Equal("pro", context.GetAttribute("Plan"));
+        Assert.Null(context.GetAttribute("plan"));
+        Assert.Null(context.GetAttribute("PLAN"));
+        Assert.Null(context.Copy().GetAttribute("plan"));
+    }
+
+    [Fact]
+    public void EvaluationContext_Set_KeepsKeysDifferingOnlyInCaseDistinct()
+    {
+        var context = new EvaluationContext()
+            .Set("plan", "free")
+            .Set("Plan", "pro");
+
+        Assert.Equal("free", context.GetAttribute("plan"));
+        Assert.Equal("pro", context.GetAttribute("Plan"));
+    }
+
+    [Fact]
+    public void EvaluationContext_GetAttribute_CustomCountryDoesNotShadowBuiltInByCase()
+    {
+        // "country" falls through to the built-in Country property, not to a custom "Country".
+        var context = new EvaluationContext().Set("Country", "US");
+
+        Assert.Null(context.GetAttribute("country"));
     }
 
     [Fact]
