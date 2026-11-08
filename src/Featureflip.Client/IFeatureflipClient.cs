@@ -87,4 +87,16 @@ public interface IFeatureflipClient : IDisposable
     /// The initial load failed with an error that retrying cannot fix.
     /// </exception>
     Task WaitForInitializationAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Where the client's flag data came from: a live fetch, the snapshot store, or nowhere yet.
+    /// </summary>
+    /// <remarks>
+    /// Without a <see cref="FeatureFlagOptions.SnapshotStore"/> this reports
+    /// <see cref="StartupSource.Live"/> once the first fetch succeeds and
+    /// <see cref="StartupSource.None"/> before it. With one, a start from the store reports
+    /// <see cref="StartupSource.Snapshot"/> and moves to <see cref="StartupSource.Live"/> on the
+    /// first successful live fetch. The value is immutable, so re-read the property to see a change.
+    /// </remarks>
+    StartupInfo StartupInfo { get; }
 }

@@ -45,11 +45,15 @@ var client = FeatureflipClient.Get(
         ReadTimeout = TimeSpan.FromSeconds(10),    // HTTP read timeout
         WaitForInitialization = false,             // Block constructor until ready
         StartOffline = false,                      // Continue even if init fails
+        SnapshotStore = null,                      // e.g. new FileSnapshotStore(path): start from the last saved config
+        MaxSnapshotAge = TimeSpan.FromHours(24),   // Oldest snapshot to start from
     }
 );
 ```
 
 The SDK key can also be set via the `FEATUREFLIP_SDK_KEY` environment variable.
+
+Set `SnapshotStore` to let a new process start from its last known configuration when the Evaluation API is unreachable at startup. `client.StartupInfo` reports whether the data came from a live fetch or a snapshot. See the [C# SDK reference](https://featureflip.io/docs/sdks/csharp/#starting-during-an-outage).
 
 ## Evaluation
 

@@ -293,6 +293,17 @@ internal sealed class FlagStore
     public IReadOnlyDictionary<string, Segment> GetAllSegments() => _snapshot.Segments;
 
     /// <summary>
+    /// Flags and segments from ONE read of the current snapshot, so a caller that needs
+    /// both (the snapshot writer) cannot see a flag set from one full replace and a segment
+    /// set from the next.
+    /// </summary>
+    public (IReadOnlyDictionary<string, FlagConfiguration> Flags, IReadOnlyDictionary<string, Segment> Segments) GetAll()
+    {
+        var current = _snapshot;
+        return (current.Flags, current.Segments);
+    }
+
+    /// <summary>
     /// Keys of the flags affected by replacing <paramref name="current"/> with the given
     /// dictionaries. A flag counts as affected when it is added, removed, or its
     /// <c>Version</c> changed — and also when one of its rules targets a segment that was
@@ -440,7 +451,7 @@ internal sealed class FlagStore
     /// <c>Undefined</c> too.
     /// </para>
     /// </remarks>
-    private sealed class UndefinedTolerantJsonElementConverter : JsonConverter<JsonElement>
+    internal sealed class UndefinedTolerantJsonElementConverter : JsonConverter<JsonElement>
     {
         public override JsonElement Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
             => JsonElement.ParseValue(ref reader);

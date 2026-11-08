@@ -84,6 +84,24 @@ internal sealed class SharedFeatureflipCore : IDisposable
     private readonly Task? _refreshTask;
     private readonly TaskCompletionSource<bool> _initializationTcs;
 
+    // Snapshot store state. All null/idle unless FeatureFlagOptions.SnapshotStore is set.
+    private readonly ISnapshotStore? _snapshotStore;
+    private readonly SnapshotPersister? _persister;
+    private readonly string _keyHash = string.Empty;
+
+    // Where the flag data came from. Written under _startupLock, read lock-free.
+    private volatile StartupInfo _startup = StartupInfo.None;
+    private readonly object _startupLock = new();
+
+    // True once a live full apply has happened. A snapshot read that finishes after it must not
+    // overwrite live data. Guarded by _startupLock.
+    private bool _liveApplied;
+
+    // Environment/version of the last full apply, written into the snapshot beside the flags.
+    // Guarded by _startupLock.
+    private string _stateEnvironment = string.Empty;
+    private int _stateVersion;
+
     private int _refCount;
     private int _isShutDown;
 
@@ -138,6 +156,9 @@ internal sealed class SharedFeatureflipCore : IDisposable
     internal int FlagsChangedListenerCount => _flagsChangedListeners.Length;
 
     public FeatureFlagOptions Options => _options;
+
+    /// <summary>Where the flag data came from. See <see cref="IFeatureflipClient.StartupInfo"/>.</summary>
+    public StartupInfo StartupInfo => _startup;
     public bool IsInitialized
     {
         get => _isInitialized;
@@ -149,23 +170,68 @@ internal sealed class SharedFeatureflipCore : IDisposable
     /// Starts HTTP client and background tasks.
     /// </summary>
     public SharedFeatureflipCore(string sdkKey, FeatureFlagOptions options, ILogger logger)
+        : this(sdkKey, options, logger, hooks: null)
+    {
+    }
+
+    /// <summary>
+    /// Seams for tests that need the init and recovery paths to be deterministic: a scripted
+    /// transport, no background data source, and injectable clocks and writer start.
+    /// </summary>
+    internal sealed class CoreTestHooks
+    {
+        public HttpMessageHandler? Handler { get; set; }
+        public bool StartDataSources { get; set; } = true;
+        public Func<long>? WallMs { get; set; }
+        public Func<long>? MonotonicMs { get; set; }
+        public Action<Action>? StartWorker { get; set; }
+    }
+
+    internal SharedFeatureflipCore(string sdkKey, FeatureFlagOptions options, ILogger logger, CoreTestHooks? hooks)
     {
         if (string.IsNullOrWhiteSpace(sdkKey)) throw new ArgumentException("SDK key is required.", nameof(sdkKey));
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _options.ValidateSnapshotOptions();
         _logger = logger ?? NullLogger.Instance;
         _inspectors = NormalizeInspectors(_options.Inspectors);
         _store = new FlagStore();
         _storeSubscription = _store.OnChange(NotifyFlagsChanged);
         _evaluator = new FlagEvaluator(_logger);
         _eventProcessor = new EventProcessor(_options.FlushInterval, _options.FlushBatchSize);
-        _httpClient = new FeatureFlagHttpClient(sdkKey, _options, _logger);
+        _httpClient = new FeatureFlagHttpClient(sdkKey, _options, _logger, hooks?.Handler);
         _cts = new CancellationTokenSource();
         _initializationTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _refCount = 1;
 
+        _snapshotStore = _options.SnapshotStore;
+        if (_snapshotStore != null)
+        {
+            if (_snapshotStore is FileSnapshotStore fileStore) fileStore.AttachLogger(_logger);
+            _keyHash = SnapshotCodec.ComputeKeyHash(_options.BaseUrl, sdkKey);
+            _persister = new SnapshotPersister(
+                _snapshotStore, _keyHash, SerializeState, _logger,
+                hooks?.WallMs, hooks?.MonotonicMs, hooks?.StartWorker);
+        }
+
+        var startDataSources = hooks?.StartDataSources ?? true;
+
         try
         {
-            if (_options.WaitForInitialization)
+            if (_snapshotStore != null)
+            {
+                // With a store configured a failed initial fetch falls back to the stored
+                // snapshot (or to defaults) and init completes instead of throwing.
+                if (_options.WaitForInitialization)
+                {
+                    Task.Run(() => InitializeWithSnapshotFallbackAsync(_cts.Token)).GetAwaiter().GetResult();
+                }
+                else
+                {
+                    _logger.LogDebug("Starting background initialization");
+                    _ = InitializeWithSnapshotFallbackAsync(_cts.Token);
+                }
+            }
+            else if (_options.WaitForInitialization)
             {
                 InitializeSync();
             }
@@ -175,8 +241,11 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 _ = InitializeAsync(_cts.Token);
             }
 
-            _flushTask = Task.Run(() => FlushLoopAsync(_cts.Token), _cts.Token);
-            _refreshTask = Task.Run(() => RefreshLoopAsync(_cts.Token), _cts.Token);
+            if (startDataSources)
+            {
+                _flushTask = Task.Run(() => FlushLoopAsync(_cts.Token), _cts.Token);
+                _refreshTask = Task.Run(() => RefreshLoopAsync(_cts.Token), _cts.Token);
+            }
         }
         catch (FeatureFlagInitializationException)
         {
@@ -188,11 +257,16 @@ internal sealed class SharedFeatureflipCore : IDisposable
             {
                 _logger.LogWarning(ex, "Initialization failed, starting in offline mode");
                 _initializationTcs.TrySetResult(false);
-                _flushTask = Task.Run(() => FlushLoopAsync(_cts.Token), _cts.Token);
-                _refreshTask = Task.Run(() => RefreshLoopAsync(_cts.Token), _cts.Token);
+                if (startDataSources)
+                {
+                    _flushTask = Task.Run(() => FlushLoopAsync(_cts.Token), _cts.Token);
+                    _refreshTask = Task.Run(() => RefreshLoopAsync(_cts.Token), _cts.Token);
+                }
             }
             else
             {
+                // Task.Wait surfaces a faulted fetch as an AggregateException; name the real cause.
+                _logger.LogWarning(ex, "Initialization failed: {Cause}", ex.GetBaseException().Message);
                 throw new FeatureFlagInitializationException("Failed to initialize feature flag client.", ex);
             }
         }
@@ -220,6 +294,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
         _refCount = 1;
         _isInitialized = true;
         IsInitialized = true;
+        _startup = StartupInfo.Live;
     }
 
     internal static SharedFeatureflipCore CreateForTesting()
@@ -899,6 +974,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 _initializationTcs.TrySetResult(false);
                 return;
             }
+            _logger.LogWarning("Initialization failed: timed out after {Timeout}s", _options.InitTimeout.TotalSeconds);
             throw new FeatureFlagInitializationException(
                 $"Initialization timed out after {_options.InitTimeout.TotalSeconds} seconds.");
         }
@@ -912,6 +988,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 _initializationTcs.TrySetResult(false);
                 return;
             }
+            _logger.LogWarning(innerException, "Initialization failed: {Cause}", innerException.Message);
             throw new FeatureFlagInitializationException(
                 "Failed to initialize feature flag client.", innerException);
         }
@@ -991,18 +1068,281 @@ internal sealed class SharedFeatureflipCore : IDisposable
         _ => false
     };
 
-    private async Task LoadFlagsAsync(CancellationToken ct)
+    /// <summary>
+    /// Fetches and applies the full configuration. Returns false when nothing was applied
+    /// (no HTTP client, or the response body was JSON null).
+    /// </summary>
+    private async Task<bool> LoadFlagsAsync(CancellationToken ct)
     {
-        if (_httpClient == null) return;
+        if (_httpClient == null) return false;
 
         var response = await _httpClient.GetFlagsAsync(ct).ConfigureAwait(false);
-        if (response != null)
+        if (response == null) return false;
+
+        // Use Replace for full updates to handle deleted flags
+        ApplyFullLive(response);
+        _logger.LogDebug("Loaded {FlagCount} flags and {SegmentCount} segments",
+            response.Flags.Count, response.Segments.Count);
+        return true;
+    }
+
+    // --- Snapshot store ---
+
+    /// <summary>
+    /// Applies a full live configuration (initial fetch, poll, SSE <c>sync</c>, segment
+    /// refetch): the store is replaced, startup info moves to live and, with a snapshot store
+    /// configured, the state is persisted.
+    /// </summary>
+    /// <remarks>
+    /// The first live apply after a snapshot start diffs against the snapshot as its baseline, so
+    /// listeners hear about what changed. After a <c>none</c> start it is a silent baseline.
+    /// </remarks>
+    private void ApplyFullLive(GetFlagsResponse response)
+    {
+        lock (_startupLock)
         {
-            // Use Replace for full updates to handle deleted flags
-            _store.Replace(response.Flags, response.Segments);
-            _logger.LogDebug("Loaded {FlagCount} flags and {SegmentCount} segments",
-                response.Flags.Count, response.Segments.Count);
+            _liveApplied = true;
+            _startup = StartupInfo.Live;
+            _stateEnvironment = response.Environment;
+            _stateVersion = response.Version;
         }
+
+        _store.Replace(response.Flags, response.Segments);
+        _persister?.PersistFull();
+    }
+
+    /// <summary>Persists after a single-flag SSE update or delete, but only once the client is live.</summary>
+    /// <remarks>
+    /// Never right after a snapshot or none start: the delta would re-stamp stale data with a fresh
+    /// write time.
+    /// </remarks>
+    private void PersistDelta()
+    {
+        if (_persister != null && _startup.Source == StartupSource.Live) _persister.Persist();
+    }
+
+    /// <summary>The wire payload for the current in-memory state, deterministic for equal state.</summary>
+    private string SerializeState()
+    {
+        string environment;
+        int version;
+        lock (_startupLock)
+        {
+            environment = _stateEnvironment;
+            version = _stateVersion;
+        }
+
+        var (flags, segments) = _store.GetAll();
+        return SnapshotCodec.SerializeState(environment, version, flags.Values, segments.Values);
+    }
+
+    /// <summary>
+    /// Startup used when a snapshot store is configured: bounded initial fetch, then the stored
+    /// snapshot on any failure. Never throws; a client with no usable snapshot still completes
+    /// initialization and serves defaults while the data source keeps trying.
+    /// </summary>
+    private async Task InitializeWithSnapshotFallbackAsync(CancellationToken ct)
+    {
+        string cause;
+        try
+        {
+            using var fetchCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (_options.InitTimeout > TimeSpan.Zero) fetchCts.CancelAfter(_options.InitTimeout);
+            try
+            {
+                if (await LoadFlagsAsync(fetchCts.Token).ConfigureAwait(false))
+                {
+                    MarkInitialized("Feature flag client initialized successfully");
+                    return;
+                }
+
+                // A JSON null body applied nothing. For startup that is a failed fetch, not a
+                // success with zero flags.
+                cause = "the flags response was empty";
+            }
+            catch (Exception ex)
+            {
+                if (ct.IsCancellationRequested) return; // shutting down
+                cause = DescribeInitFailure(ex, fetchCts.IsCancellationRequested);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Initialization failed before the snapshot store was consulted");
+            cause = ex.Message;
+        }
+
+        try
+        {
+            await LoadSnapshotFallbackAsync(cause, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Loading the snapshot failed; serving defaults");
+        }
+
+        if (ct.IsCancellationRequested) return;
+        MarkInitialized("Feature flag client initialized without live data");
+    }
+
+    private void MarkInitialized(string message)
+    {
+        _isInitialized = true;
+        _initializationTcs.TrySetResult(true);
+        _logger.LogDebug(message);
+    }
+
+    private string DescribeInitFailure(Exception ex, bool timedOut)
+    {
+        if (timedOut) return $"timed out after {_options.InitTimeout.TotalSeconds}s";
+        // The HTTP client's own timeout surfaces as a cancellation with no message worth showing.
+        if (ex is OperationCanceledException) return "the request timed out";
+        return ex.Message;
+    }
+
+    /// <summary>Serves the stored snapshot after a failed initial fetch. Applied without persisting.</summary>
+    private async Task LoadSnapshotFallbackAsync(string cause, CancellationToken ct)
+    {
+        var store = _snapshotStore!;
+        var (finished, text) = await ReadStoreBoundedAsync(store, cause, ct).ConfigureAwait(false);
+        if (!finished || text == null) return; // a plain miss: no reason
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (!SnapshotCodec.TryDecode(text, _keyHash, now, _logger, out var data, out var fetchedAt, out var why))
+        {
+            RejectSnapshot(cause, SnapshotCodec.ReasonInvalid, why, null);
+            return;
+        }
+
+        var ageMs = Math.Max(0, now - fetchedAt);
+        var ageSeconds = ageMs / 1000;
+        var limit = _options.MaxSnapshotAge;
+        if (ageMs > (long)limit.TotalMilliseconds)
+        {
+            RejectSnapshot(cause, SnapshotCodec.ReasonExpired, $"{ageSeconds}s old, limit {(long)limit.TotalSeconds}s", ageSeconds);
+            return;
+        }
+
+        lock (_startupLock)
+        {
+            if (_liveApplied) return; // live data already arrived; a late snapshot must not overwrite it
+            _stateEnvironment = data!.Environment;
+            _stateVersion = data.Version;
+            // The store's first Replace is the silent baseline, so this fires no listeners.
+            _store.Replace(data.Flags, data.Segments);
+            _startup = new StartupInfo(StartupSource.Snapshot, SnapshotCodec.ReasonSnapshot, ageSeconds);
+        }
+
+        _logger.LogWarning(
+            "Initial flag fetch failed ({Cause}); serving persisted snapshot ({AgeSeconds}s old)", cause, ageSeconds);
+    }
+
+    private void RejectSnapshot(string cause, string reason, string why, long? ageSeconds)
+    {
+        lock (_startupLock)
+        {
+            // Live data arrived while a slow store was being read: there is nothing to report,
+            // and "serving defaults" would be false.
+            if (_liveApplied) return;
+            _startup = new StartupInfo(StartupSource.None, reason, ageSeconds);
+        }
+
+        _logger.LogWarning(
+            "Initial flag fetch failed ({Cause}); ignoring persisted snapshot ({Reason}: {Why}); serving defaults",
+            cause, reason, why);
+    }
+
+    /// <summary>
+    /// Reads the store, bounded by the init timeout. A store that ignores its token is still
+    /// bounded and its late result is ignored. A throwing store is a miss.
+    /// </summary>
+    private async Task<(bool Finished, string? Text)> ReadStoreBoundedAsync(
+        ISnapshotStore store, string cause, CancellationToken ct)
+    {
+        var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Task<string?> read;
+        try
+        {
+            var token = readCts.Token;
+            // On the pool so a store that blocks synchronously before returning its task
+            // cannot hold the caller past the bound.
+            read = Task.Run(() => store.GetAsync(token));
+        }
+        catch (Exception ex)
+        {
+            LogStoreReadProblem(ex, "Initial flag fetch failed ({Cause}) and the snapshot store read failed; serving defaults", cause);
+            readCts.Dispose();
+            return (true, null);
+        }
+
+        using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var delay = Task.Delay(
+            _options.InitTimeout > TimeSpan.Zero ? _options.InitTimeout : TimeSpan.FromMilliseconds(1),
+            delayCts.Token);
+
+        // A cancelled delay completes the WhenAny as a cancelled task rather than throwing, so
+        // shutdown and timeout both arrive here as "the read did not finish first".
+        if (await Task.WhenAny(read, delay).ConfigureAwait(false) != read)
+        {
+            // Abandoned: ask a cooperative store to stop, ignore a late result, observe any later
+            // fault so it cannot surface as an unobserved task exception, and release the source
+            // once the store is really done with its token.
+            readCts.Cancel();
+            _ = read.ContinueWith(
+                static (t, state) =>
+                {
+                    _ = t.Exception;
+                    ((CancellationTokenSource)state!).Dispose();
+                },
+                readCts,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            if (!ct.IsCancellationRequested)
+            {
+                LogStoreReadProblem(
+                    null,
+                    "Initial flag fetch failed ({Cause}) and the snapshot store read timed out after {Timeout}s; serving defaults",
+                    cause, _options.InitTimeout.TotalSeconds);
+            }
+
+            return (false, null);
+        }
+
+        delayCts.Cancel();
+        readCts.Dispose();
+        try
+        {
+            var text = await read.ConfigureAwait(false);
+            if (text == null && !ct.IsCancellationRequested)
+            {
+                // A plain miss carries no snapshot reason, so this line is the only place the
+                // failed fetch is named. The cause never contains the SDK key.
+                _logger.LogWarning(
+                    "Initial flag fetch failed ({Cause}); no snapshot stored; serving defaults", cause);
+            }
+
+            return (true, text);
+        }
+        catch (Exception ex)
+        {
+            LogStoreReadProblem(ex, "Initial flag fetch failed ({Cause}) and the snapshot store read failed; serving defaults", cause);
+            return (true, null);
+        }
+    }
+
+    /// <summary>
+    /// Warns about a store read that timed out or failed, unless live data already arrived while it
+    /// was running: then the client is not serving defaults and the line would mislead, so it drops
+    /// to debug.
+    /// </summary>
+    private void LogStoreReadProblem(Exception? ex, string message, params object[] args)
+    {
+        bool live;
+        lock (_startupLock) live = _liveApplied;
+        var level = live ? LogLevel.Debug : LogLevel.Warning;
+        if (ex != null) _logger.Log(level, ex, message, args);
+        else _logger.Log(level, message, args);
     }
 
     /// <summary>
@@ -1058,7 +1398,11 @@ internal sealed class SharedFeatureflipCore : IDisposable
         // overwritten by a late initialization
         try
         {
-            var timeout = _options.InitTimeout + TimeSpan.FromSeconds(5);
+            // With a snapshot store the init path can take a fetch plus a store read, each bounded
+            // by the init timeout, and the data source must not start (and apply live data) before
+            // the snapshot decision is made.
+            var timeout = (_snapshotStore != null ? _options.InitTimeout + _options.InitTimeout : _options.InitTimeout)
+                + TimeSpan.FromSeconds(5);
             var completedTask = await Task.WhenAny(
                 _initializationTcs.Task,
                 Task.Delay(timeout, ct)).ConfigureAwait(false);
@@ -1189,6 +1533,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
                         if (flag != null)
                         {
                             _store.Upsert(new List<FlagConfiguration> { flag });
+                            PersistDelta();
                             MarkInitializedIfNeeded();
                             _logger.LogDebug("SSE {EventType}: upserted flag {FlagKey}", evt.Type, evt.FlagKey);
                         }
@@ -1204,6 +1549,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 if (!string.IsNullOrEmpty(evt.FlagKey))
                 {
                     _store.RemoveFlag(evt.FlagKey!);
+                    PersistDelta();
                     _logger.LogDebug("SSE flag.deleted: removed flag {FlagKey}", evt.FlagKey);
                 }
                 break;
@@ -1214,7 +1560,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
                     var response = await _httpClient!.GetFlagsAsync().ConfigureAwait(false);
                     if (response != null)
                     {
-                        _store.Replace(response.Flags, response.Segments);
+                        ApplyFullLive(response);
                         MarkInitializedIfNeeded();
                         _logger.LogDebug("SSE segment.updated: refetched all flags");
                     }
@@ -1231,13 +1577,20 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 // Full replace, never merge (mirrors polling + segment.updated).
                 if (evt.Snapshot != null)
                 {
-                    _store.Replace(evt.Snapshot.Flags, evt.Snapshot.Segments);
+                    ApplyFullLive(evt.Snapshot);
                     MarkInitializedIfNeeded();
                     _logger.LogDebug("SSE sync: replaced store with {FlagCount} flags", evt.Snapshot.Flags?.Count ?? 0);
                 }
                 break;
 
             case SseEventType.Ping:
+                // Heartbeat: while live, rewrite the unchanged state at most once per refresh
+                // interval so the snapshot does not age out while the client stays connected.
+                if (_persister != null && _startup.Source == StartupSource.Live && !_persister.WithinRefreshWindow())
+                {
+                    _persister.Persist();
+                }
+
                 break;
         }
     }
@@ -1261,7 +1614,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
     // A single corrective poll with no trailing interval wait — used by the
     // SSE-failure path, where the reconnect loop already applies its own backoff.
     // RefreshViaPollingAsync (the non-streaming poll loop) adds the interval delay.
-    private async Task PollOnceAsync(CancellationToken ct)
+    internal async Task PollOnceAsync(CancellationToken ct)
     {
         try
         {
@@ -1301,6 +1654,9 @@ internal sealed class SharedFeatureflipCore : IDisposable
 
     private void Shutdown()
     {
+        // No trailing snapshot write starts after this. A write already in flight is neither
+        // awaited nor cancelled.
+        _persister?.Shutdown();
         _storeSubscription.Dispose();
 
         if (_owningMap != null && _owningKey != null)

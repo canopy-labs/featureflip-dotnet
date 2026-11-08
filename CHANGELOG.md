@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.14.0 — 2026-11-07
+
+### Added
+
+- Opt-in snapshot store: with `SnapshotStore` set, the SDK saves the flag configuration as it receives it, and a later start that can't reach the Evaluation API loads the saved copy instead of serving defaults. A built-in `FileSnapshotStore` writes it to a local file, and you can implement the store interface to share one snapshot through something like Redis. A snapshot older than `MaxSnapshotAge` (24 hours by default) is ignored. `client.StartupInfo` reports whether the client started from the live API, a snapshot, or neither. Off unless you set it. (#4652)
+
+### Fixed
+
+- Snapshot options are validated on every `Get()`, so an invalid `MaxSnapshotAge` (or `InitTimeout <= 0` with a `SnapshotStore`) on a call that reuses an existing core throws `FeatureFlagInitializationException` like the first call, instead of logging 'options ignored'. (#5150)
+- With a snapshot store configured and nothing stored yet, a failed or timed-out initial fetch now logs a warning naming the cause (HTTP status, timeout or error), never the SDK key. It used to log nothing. (#5153)
+
 ## 2.13.0 — 2026-10-30
 
 ### Fixed

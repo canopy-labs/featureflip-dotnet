@@ -35,17 +35,24 @@ internal sealed class FeatureFlagHttpClient : IDisposable
     private bool _disposed;
 
     public FeatureFlagHttpClient(string sdkKey, FeatureFlagOptions options, ILogger? logger = null)
+        : this(sdkKey, options, logger, handler: null)
+    {
+    }
+
+    /// <summary>
+    /// <paramref name="handler"/> replaces the transport for both clients. Test seam only: it
+    /// lets the core's init and recovery paths run against a scripted transport.
+    /// </summary>
+    internal FeatureFlagHttpClient(string sdkKey, FeatureFlagOptions options, ILogger? logger, HttpMessageHandler? handler)
     {
         _logger = logger;
         var baseAddress = new Uri(options.BaseUrl.TrimEnd('/') + "/");
 
         // One-shot GET/POST client. HttpClient.Timeout is a *total* request timeout, which
         // is the correct bound for the short, bounded flag/event requests.
-        _httpClient = new HttpClient
-        {
-            BaseAddress = baseAddress,
-            Timeout = options.ReadTimeout
-        };
+        _httpClient = (handler == null ? new HttpClient() : new HttpClient(handler, disposeHandler: false));
+        _httpClient.BaseAddress = baseAddress;
+        _httpClient.Timeout = options.ReadTimeout;
         _httpClient.DefaultRequestHeaders.Add("Authorization", sdkKey);
         SdkIdentity.Apply(_httpClient.DefaultRequestHeaders, options, logger);
 
@@ -55,7 +62,13 @@ internal sealed class FeatureFlagHttpClient : IDisposable
         // never sustain (#1526). The stream runs unbounded and relies on the caller's
         // CancellationToken for shutdown (and ConnectTimeout, where supported, to bound
         // connection establishment). Mirrors the Go/Java/Python SDKs.
-        _streamingClient = CreateStreamingClient(baseAddress, options.ConnectTimeout);
+        _streamingClient = handler == null
+            ? CreateStreamingClient(baseAddress, options.ConnectTimeout)
+            : new HttpClient(handler, disposeHandler: false)
+            {
+                BaseAddress = baseAddress,
+                Timeout = System.Threading.Timeout.InfiniteTimeSpan
+            };
         _streamingClient.DefaultRequestHeaders.Add("Authorization", sdkKey);
         // The stream's own client needs the token too; it shares no headers with the one above.
         // Applied with a null logger so an invalid wrapper warns once, not once per client.

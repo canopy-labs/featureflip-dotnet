@@ -149,6 +149,59 @@ public class ReflectionFreeClientTests
         Assert.Equal(EvaluationReason.FlagNotFound, client.VariationDetail("bool-flag", ctx, false).Reason);
     }
 
+    [Fact]
+    public async Task SnapshotStore_PersistsAndRestoresWithoutReflection()
+    {
+        var store = new RecordingStore();
+        string sdkKey;
+        string baseUrl;
+        await using (var server = new StubFlagServer(PolledFlags))
+        {
+            sdkKey = server.SdkKey;
+            baseUrl = server.BaseUrl;
+            using var live = server.CreateClient(streaming: false, snapshotStore: store);
+            await live.WaitForInitializationAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await store.WaitForPutAsync();
+            Assert.Equal(StartupSource.Live, live.StartupInfo.Source);
+        }
+
+        // The first client was disposed at the end of the block above, which shut its core down.
+        // The same key and base URL with nothing listening: the client starts from the stored text.
+        using var restored = FeatureflipClient.Get(sdkKey, new FeatureFlagOptions
+        {
+            BaseUrl = baseUrl,
+            Streaming = false,
+            WaitForInitialization = true,
+            InitTimeout = TimeSpan.FromSeconds(3),
+            PollInterval = TimeSpan.FromMinutes(10),
+            SnapshotStore = store
+        });
+
+        Assert.Equal(StartupSource.Snapshot, restored.StartupInfo.Source);
+        var ctx = new EvaluationContext { UserId = "user-1" }.Set("plan", "pro");
+        Assert.True(restored.BoolVariation("bool-flag", ctx, false));
+        Assert.Equal("hello", restored.StringVariation("string-flag", ctx, "default"));
+        var element = restored.VariationDetail("json-flag", ctx, default(JsonElement));
+        Assert.Equal("blue", element.Value.GetProperty("color").GetString());
+    }
+
+    private sealed class RecordingStore : ISnapshotStore
+    {
+        private readonly TaskCompletionSource<bool> _put = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private volatile string? _text;
+
+        public Task WaitForPutAsync() => _put.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        public Task<string?> GetAsync(CancellationToken cancellationToken) => Task.FromResult(_text);
+
+        public Task PutAsync(string text, CancellationToken cancellationToken)
+        {
+            _text = text;
+            _put.TrySetResult(true);
+            return Task.CompletedTask;
+        }
+    }
+
     /// <summary>
     /// Flushes until the server has captured an event body. A flush that hits a retryable
     /// failure (e.g. the request timeout on a loaded runner) re-queues the batch and returns

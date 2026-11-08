@@ -63,8 +63,13 @@ internal sealed class StubFlagServer : IAsyncDisposable
         _loop = Task.Run(LoopAsync);
     }
 
-    public IFeatureflipClient CreateClient(bool streaming) => FeatureflipClient.Get(_sdkKey, new FeatureFlagOptions
+    public string BaseUrl => _baseUrl;
+
+    public string SdkKey => _sdkKey;
+
+    public IFeatureflipClient CreateClient(bool streaming, ISnapshotStore? snapshotStore = null) => FeatureflipClient.Get(_sdkKey, new FeatureFlagOptions
     {
+        SnapshotStore = snapshotStore,
         BaseUrl = _baseUrl,
         Streaming = streaming,
         // Background init: the path whose wait used to hang forever (#4301).

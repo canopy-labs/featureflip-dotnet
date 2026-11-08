@@ -106,6 +106,8 @@ public sealed class FeatureflipClient : IFeatureflipClient
         }
 
         var resolvedOptions = options ?? new FeatureFlagOptions();
+        // Before the reuse lookup, so an invalid option throws whether or not a core exists.
+        resolvedOptions.ValidateSnapshotOptions();
         var resolvedLogger = (ILogger?)logger ?? NullLogger.Instance;
 
         // Retry loop handles the race where a cached core is found but has already begun
@@ -182,7 +184,12 @@ public sealed class FeatureflipClient : IFeatureflipClient
             && a.WaitForInitialization == b.WaitForInitialization
             && a.StartOffline == b.StartOffline
             && a.ConnectTimeout == b.ConnectTimeout
-            && a.ReadTimeout == b.ReadTimeout;
+            && a.ReadTimeout == b.ReadTimeout
+            // The store compares by identity, and only when the later call names one: omitting
+            // the store (or the max age) is not "a different value", so a caller that shares the
+            // key without repeating the snapshot options does not trigger a spurious warning.
+            && (b.SnapshotStore == null || ReferenceEquals(a.SnapshotStore, b.SnapshotStore))
+            && (b.MaxSnapshotAgeIfSet == null || a.MaxSnapshotAge == b.MaxSnapshotAge);
     }
 
     /// <inheritdoc />
@@ -246,6 +253,9 @@ public sealed class FeatureflipClient : IFeatureflipClient
 
     /// <inheritdoc />
     public bool IsInitialized => Volatile.Read(ref _disposed) == 0 && _core.IsInitialized;
+
+    /// <inheritdoc />
+    public StartupInfo StartupInfo => _core.StartupInfo;
 
     /// <inheritdoc />
     public Task WaitForInitializationAsync(CancellationToken cancellationToken = default)

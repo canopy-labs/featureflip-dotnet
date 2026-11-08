@@ -73,4 +73,58 @@ public class FeatureFlagOptions
 
     /// <summary>Version of the wrapper named by <see cref="WrapperName"/>. Optional.</summary>
     public string? WrapperVersion { get; set; }
+
+    private TimeSpan? _maxSnapshotAge;
+
+    /// <summary>
+    /// Optional store the client starts from when the initial fetch from the Evaluation API
+    /// fails or times out, and writes to after every successful sync. Off by default, so
+    /// nothing is written to disk unless you set one. Use <see cref="FileSnapshotStore"/> or
+    /// implement <see cref="ISnapshotStore"/> over your own backend.
+    /// </summary>
+    /// <remarks>
+    /// A snapshot holds the targeting rules for the environment, including attribute values
+    /// used in rules, so treat the store like any other place that holds configuration.
+    /// Honored on the first <see cref="FeatureflipClient.Get"/> call for a given SDK key.
+    /// A later call that passes a different store instance logs the usual "options ignored"
+    /// warning; a later call that omits the store does not.
+    /// </remarks>
+    public ISnapshotStore? SnapshotStore { get; set; }
+
+    /// <summary>
+    /// Oldest snapshot the client will start from, measured from when the snapshot was
+    /// written. Past it the client serves defaults and reports <c>snapshot-expired</c>.
+    /// Default 24 hours. Must be positive: a zero or negative value is rejected with a
+    /// <see cref="FeatureFlagInitializationException"/> when the client is created. There is
+    /// no "never expire" value.
+    /// </summary>
+    public TimeSpan MaxSnapshotAge
+    {
+        get => _maxSnapshotAge ?? TimeSpan.FromHours(24);
+        set => _maxSnapshotAge = value;
+    }
+
+    /// <summary>The explicitly set max age, or null when left at the default.</summary>
+    internal TimeSpan? MaxSnapshotAgeIfSet => _maxSnapshotAge;
+
+    /// <summary>
+    /// Rejects snapshot settings that cannot work. Run by <see cref="FeatureflipClient.Get"/>
+    /// before it looks for an existing client, so a reused client throws exactly as the first
+    /// call would. <see cref="InitTimeout"/> is only checked when a store is set, because the
+    /// store read is bounded by it; without a store its behavior is unchanged.
+    /// </summary>
+    internal void ValidateSnapshotOptions()
+    {
+        if (_maxSnapshotAge is { } maxAge && maxAge <= TimeSpan.Zero)
+        {
+            throw new FeatureFlagInitializationException(
+                "MaxSnapshotAge must be a positive duration. There is no value that disables expiry.");
+        }
+
+        if (SnapshotStore != null && InitTimeout <= TimeSpan.Zero)
+        {
+            throw new FeatureFlagInitializationException(
+                "InitTimeout must be a positive duration when a SnapshotStore is configured, because it bounds the snapshot read.");
+        }
+    }
 }

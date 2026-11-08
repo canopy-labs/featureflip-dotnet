@@ -53,6 +53,7 @@ try
 
     await PollingAsync();
     await StreamingAsync();
+    await SnapshotAsync();
 }
 catch (Exception ex)
 {
@@ -147,4 +148,46 @@ async Task StreamingAsync()
     var detail = client.VariationDetail("sse-flag", ctx, false);
     Check(detail.Value && detail.Reason == EvaluationReason.Fallthrough,
         $"streaming: sync snapshot applied (got {detail.Value}, {detail.Reason} {detail.ErrorMessage})");
+}
+
+async Task SnapshotAsync()
+{
+    // Client A persists through a store; the server then goes away and client B starts from the
+    // stored text. Exercises the envelope codec, the wire serializer and the file store natively.
+    var path = Path.Combine(Path.GetTempPath(), "ff-aot-snapshot-" + Guid.NewGuid().ToString("N"));
+    string sdkKey;
+    string baseUrl;
+    try
+    {
+        await using (var server = new StubFlagServer(PolledFlags))
+        {
+            sdkKey = server.SdkKey;
+            baseUrl = server.BaseUrl;
+            using var live = server.CreateClient(streaming: false, snapshotStore: new FileSnapshotStore(path));
+            await live.WaitForInitializationAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (DateTime.UtcNow < deadline && !(File.Exists(path) && new FileInfo(path).Length > 0))
+            {
+                await Task.Delay(50);
+            }
+        }
+
+        using var restored = FeatureflipClient.Get(sdkKey, new FeatureFlagOptions
+        {
+            BaseUrl = baseUrl,
+            Streaming = false,
+            WaitForInitialization = true,
+            InitTimeout = TimeSpan.FromSeconds(3),
+            PollInterval = TimeSpan.FromMinutes(10),
+            SnapshotStore = new FileSnapshotStore(path)
+        });
+
+        var ctx = new EvaluationContext { UserId = "user-1" }.Set("plan", "pro");
+        Check(restored.StartupInfo.Source == StartupSource.Snapshot, $"snapshot: client started from the stored snapshot (got {restored.StartupInfo})");
+        Check(restored.StringVariation("string-flag", ctx, "default") == "hello", "snapshot: stored flag value is served");
+    }
+    finally
+    {
+        try { File.Delete(path); } catch { /* best effort */ }
+    }
 }

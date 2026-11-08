@@ -18,6 +18,15 @@
     <PackageReference Include="FluentAssertions" Version="8.11.0" />
   </ItemGroup>
 
+  <!-- PosixOpen is compiled into the netstandard2.0 SDK build only. Link it here so its open(2)
+       helper can be exercised directly on this net8/net10 host. -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);SNAPSHOT_POSIX_OPEN_TESTS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\Featureflip.Client\Internal\PosixOpen.cs" Link="Snapshot\PosixOpen.linked.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\Featureflip.Client\Featureflip.Client.csproj" />
   </ItemGroup>
