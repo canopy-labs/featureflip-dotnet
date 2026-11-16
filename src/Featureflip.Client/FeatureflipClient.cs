@@ -50,7 +50,7 @@ public sealed class FeatureflipClient : IFeatureflipClient
         _core = new SharedFeatureflipCore(
             sdkKey,
             options ?? new FeatureFlagOptions(),
-            (ILogger?)logger ?? NullLogger.Instance);
+            Internal.RedactingLogger.Wrap(logger, sdkKey));
     }
 
     /// <summary>
@@ -108,7 +108,7 @@ public sealed class FeatureflipClient : IFeatureflipClient
         var resolvedOptions = options ?? new FeatureFlagOptions();
         // Before the reuse lookup, so an invalid option throws whether or not a core exists.
         resolvedOptions.ValidateSnapshotOptions();
-        var resolvedLogger = (ILogger?)logger ?? NullLogger.Instance;
+        var resolvedLogger = Internal.RedactingLogger.Wrap(logger, sdkKey);
 
         // Retry loop handles the race where a cached core is found but has already begun
         // shutting down (refcount hit 0 between lookup and TryAcquire). Progress is

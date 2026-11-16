@@ -64,6 +64,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
     private readonly EventProcessor _eventProcessor;
     private readonly FeatureFlagOptions _options;
     private readonly ILogger _logger;
+    private readonly string? _sdkKey;
 
     // Snapshot of the configured evaluation inspectors, taken once at construction and
     // never mutated afterwards. Immutable-after-init means the hot evaluation path can
@@ -192,7 +193,8 @@ internal sealed class SharedFeatureflipCore : IDisposable
         if (string.IsNullOrWhiteSpace(sdkKey)) throw new ArgumentException("SDK key is required.", nameof(sdkKey));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.ValidateSnapshotOptions();
-        _logger = logger ?? NullLogger.Instance;
+        _sdkKey = sdkKey;
+        _logger = RedactingLogger.Wrap(logger, sdkKey);
         _inspectors = NormalizeInspectors(_options.Inspectors);
         _store = new FlagStore();
         _storeSubscription = _store.OnChange(NotifyFlagsChanged);
@@ -206,7 +208,11 @@ internal sealed class SharedFeatureflipCore : IDisposable
         _snapshotStore = _options.SnapshotStore;
         if (_snapshotStore != null)
         {
-            if (_snapshotStore is FileSnapshotStore fileStore) fileStore.AttachLogger(_logger);
+            if (_snapshotStore is FileSnapshotStore fileStore)
+            {
+                fileStore.AttachLogger(_logger);
+                fileStore.RedactKey(sdkKey);
+            }
             _keyHash = SnapshotCodec.ComputeKeyHash(_options.BaseUrl, sdkKey);
             _persister = new SnapshotPersister(
                 _snapshotStore, _keyHash, SerializeState, _logger,
@@ -267,7 +273,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
             {
                 // Task.Wait surfaces a faulted fetch as an AggregateException; name the real cause.
                 _logger.LogWarning(ex, "Initialization failed: {Cause}", ex.GetBaseException().Message);
-                throw new FeatureFlagInitializationException("Failed to initialize feature flag client.", ex);
+                throw new FeatureFlagInitializationException("Failed to initialize feature flag client.", RedactingLogger.Sanitize(ex, _sdkKey)!);
             }
         }
     }
@@ -990,7 +996,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
             }
             _logger.LogWarning(innerException, "Initialization failed: {Cause}", innerException.Message);
             throw new FeatureFlagInitializationException(
-                "Failed to initialize feature flag client.", innerException);
+                "Failed to initialize feature flag client.", RedactingLogger.Sanitize(innerException, _sdkKey)!);
         }
 
         _isInitialized = true;
@@ -1028,7 +1034,7 @@ internal sealed class SharedFeatureflipCore : IDisposable
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
             _initializationTcs.TrySetException(
-                new FeatureFlagInitializationException("Failed to initialize feature flag client.", ex));
+                new FeatureFlagInitializationException("Failed to initialize feature flag client.", RedactingLogger.Sanitize(ex, _sdkKey)!));
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.14.1 — 2026-11-16
+
+### Security
+
+- The SDK key is now redacted from every log line the SDK emits, including error messages from the HTTP stack and the logger you pass in. A key quoted in a logged message, structured value or exception text comes out as `[redacted]`. (#5167)
+
 ## 2.14.0 — 2026-11-07
 
 ### Added

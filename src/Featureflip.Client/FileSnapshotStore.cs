@@ -38,6 +38,7 @@ public sealed class FileSnapshotStore : ISnapshotStore
     private readonly string _path;
     private volatile ILogger _logger = NullLogger.Instance;
     private int _hasLogger;
+    private readonly object _loggerGate = new();
 
     /// <summary>Creates a store backed by the file at <paramref name="path"/>.</summary>
     public FileSnapshotStore(string path) : this(path, null)
@@ -62,7 +63,16 @@ public sealed class FileSnapshotStore : ISnapshotStore
     /// </summary>
     internal void AttachLogger(ILogger logger)
     {
-        if (Interlocked.CompareExchange(ref _hasLogger, 1, 0) == 0) _logger = logger;
+        lock (_loggerGate)
+        {
+            if (_hasLogger == 0) { _hasLogger = 1; _logger = logger; }
+        }
+    }
+
+    /// <summary>Strips the SDK key from whatever the store logs, including a host-supplied logger.</summary>
+    internal void RedactKey(string sdkKey)
+    {
+        lock (_loggerGate) _logger = Internal.RedactingLogger.Wrap(_logger, sdkKey);
     }
 
     /// <inheritdoc />

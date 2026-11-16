@@ -136,11 +136,12 @@ mock.Setup(c => c.BoolVariation("my-feature", It.IsAny<EvaluationContext>(), fal
 - **Event tracking** - Automatic batching and background flushing
 - **DI support** - `AddFeatureflipClient()` extension method
 - **Interface-based** - `IFeatureflipClient` for easy mocking
-- **Multi-target** - Supports .NET 8.0 and .NET Standard 2.0
+- **Multi-target** - Supports .NET 8.0, .NET 10.0 and .NET Standard 2.0
 
 ## Requirements
 
 - .NET 8.0+ or .NET Standard 2.0 compatible runtime
+- Tested on .NET 8, .NET 10 and .NET 11 (a .NET 11 app loads the .NET 10.0 build)
 
 ## License
 
